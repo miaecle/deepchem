@@ -356,6 +356,6 @@ class MolGeneratorTensorGraph(TensorGraph):
             edmol.AddBond(i, j, _bondtypes[bonds[i,j]])
       mol = edmol.GetMol()
       Chem.SanitizeMol(mol)
-      return Chem.MolToSmiles(mol)
+      return mol
     except:
       return None
