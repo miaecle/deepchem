@@ -20,6 +20,7 @@ from deepchem.molnet.load_function.ppb_datasets import load_ppb
 from deepchem.molnet.load_function.qm7_datasets import load_qm7
 from deepchem.molnet.load_function.qm7_datasets import load_qm7_from_mat, load_qm7b_from_mat
 from deepchem.molnet.load_function.qm8_datasets import load_qm8
+from deepchem.molnet.load_function.qm8_molgen_datasets import load_qm8_molgen
 from deepchem.molnet.load_function.qm9_datasets import load_qm9
 from deepchem.molnet.load_function.sampl_datasets import load_sampl
 from deepchem.molnet.load_function.sider_datasets import load_sider

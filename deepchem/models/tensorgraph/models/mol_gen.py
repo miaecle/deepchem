@@ -10,6 +10,7 @@ import collections
 import numpy as np
 import six
 import tensorflow as tf
+from rdkit import Chem
 
 from deepchem.data import NumpyDataset
 from deepchem.feat.graph_features import ConvMolFeaturizer
@@ -192,7 +193,30 @@ class MolGeneratorTensorGraph(TensorGraph):
           atom_numbers_label, bonds_label = self.generate_label(mol)
           atom_numbers_labels.append(atom_numbers_label)
           bonds_labels.append(bonds_label)
-          
+        
+        # Padding
+        n_valid_samples = len(atom_feat)
+        for i in range(self.batch_size - n_valid_samples):
+          im = i + n_valid_samples
+          mol = X_b[i]
+          n_atoms = mol.get_num_atoms()
+          atom_split.extend([im] * n_atoms)
+          C0, C1 = np.meshgrid(np.arange(n_atoms), np.arange(n_atoms))
+          atom_to_pair.append(
+              np.transpose(
+                  np.array([C1.flatten() + start,
+                            C0.flatten() + start])))
+          pair_split.extend(C1.flatten() + start)
+          start = start + n_atoms
+          atom_feat.append(mol.get_atom_features())
+          pair_feat.append(
+              np.reshape(mol.get_pair_features(), (n_atoms * n_atoms,
+                                                   self.n_pair_feat)))
+
+          atom_numbers_label, bonds_label = self.generate_label(mol)
+          atom_numbers_labels.append(atom_numbers_label)
+          bonds_labels.append(bonds_label)
+        
         feed_dict[self.atom_features] = np.concatenate(atom_feat, axis=0)
         feed_dict[self.pair_features] = np.concatenate(pair_feat, axis=0)
         feed_dict[self.pair_split] = np.array(pair_split)
@@ -200,7 +224,8 @@ class MolGeneratorTensorGraph(TensorGraph):
         feed_dict[self.atom_to_pair] = np.concatenate(atom_to_pair, axis=0)
         feed_dict[self.bonds_label] = np.stack(bonds_labels, axis=0)
         feed_dict[self.atom_numbers_label] = np.stack(atom_numbers_labels, axis=0)
-        feed_dict[self.weights] = np.ones_like(feed_dict[self.atom_numbers_label])
+        feed_dict[self.weights] = np.concatenate([np.ones((n_valid_samples, self.output_max_out)),
+                 np.zeros((self.batch_size - n_valid_samples, self.output_max_out))], axis=0)
         
         yield feed_dict
 
@@ -211,7 +236,8 @@ class MolGeneratorTensorGraph(TensorGraph):
     bonds = from_one_hot(bonds, axis=2)
     atom_numbers = from_one_hot(mol.get_atom_features()[:, :44])
     n_atoms = len(atom_numbers)
-    order = np.argsort(atom_numbers)
+    #order = np.argsort(atom_numbers)
+    order = np.arange(n_atoms)
     return self.tokenize(atom_numbers[order]), \
         np.pad(bonds[:, order][order, :], ((0, self.output_max_out - n_atoms),
                                            (0, self.output_max_out - n_atoms)),
@@ -274,7 +300,7 @@ class MolGeneratorTensorGraph(TensorGraph):
 
   def predict(self, dataset, transformers=[], batch_size=None):
     # MPNN only accept padded input
-    generator = self.default_generator(dataset, predict=True, pad_batches=True)
+    generator = self.default_generator(dataset, predict=True, pad_batches=False)
     return self.predict_on_generator(generator, transformers)
 
   def predict_on_generator(self, generator, transformers=[]):
@@ -286,9 +312,10 @@ class MolGeneratorTensorGraph(TensorGraph):
       self.build()
     with self._get_tf("Graph").as_default():
       out_tensors = [x.out_tensor for x in self.outputs]
-      results = [[] for i in range(len(out_tensors))]
+      results = [[], []]
       for feed_dict in generator:
         # Extract number of unique samples in the batch from w_b
+        n_valid_samples = int(sum(feed_dict[self.weights][:, 0]))
         feed_dict = {
             self.layers[k.name].out_tensor: v
             for k, v in six.iteritems(feed_dict)
@@ -296,5 +323,39 @@ class MolGeneratorTensorGraph(TensorGraph):
         feed_dict[self._training_placeholder] = 0.0
         result = self.session.run(out_tensors, feed_dict=feed_dict)
         for i, out in enumerate(result):
-          results[i].append(out)
+          results[i].append(out[:n_valid_samples])
       return results
+
+  def predict_mol(self, dataset, transformers=[], batch_size=None):
+    pred = self.predict(dataset, transformers, batch_size)
+    atoms_pred = from_one_hot(np.concatenate(pred[0], axis=0), axis=2)
+    bonds_pred = from_one_hot(np.concatenate(pred[1], axis=0), axis=3)
+    output_mols = []
+    for i in range(atoms_pred.shape[0]):
+      output_mols.append(self.rebuild_mol(atoms_pred[i], bonds_pred[i]))
+    return output_mols
+  
+  def rebuild_mol(self, atoms, bonds):
+    _bondtypes = {1: Chem.BondType.SINGLE,
+                  2: Chem.BondType.DOUBLE,
+                  3: Chem.BondType.TRIPLE,
+                  4: Chem.BondType.AROMATIC}
+    try:
+      mol = Chem.Mol()
+      edmol = Chem.EditableMol(mol)
+      for i, atom_id in enumerate(atoms):
+        atom = self.atom_case[atom_id]
+        if atom == 'End':
+          end = i
+          break
+        rdatom = Chem.Atom(atom)
+        edmol.AddAtom(rdatom)
+      for i in range(end):
+        for j in range(i+1, end):
+          if bonds[i, j] > 0:
+            edmol.AddBond(i, j, _bondtypes[bonds[i,j]])
+      mol = edmol.GetMol()
+      Chem.SanitizeMol(mol)
+      return Chem.MolToSmiles(mol)
+    except:
+      return None
