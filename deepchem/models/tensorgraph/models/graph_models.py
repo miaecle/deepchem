@@ -951,13 +951,17 @@ class MPNNTensorGraph(TensorGraph):
     self.pair_features = Feature(shape=(None, self.n_pair_feat))
     self.atom_split = Feature(shape=(None,), dtype=tf.int32)
     self.atom_to_pair = Feature(shape=(None, 2), dtype=tf.int32)
-
+    
+    atom_features = Dense(
+        out_channels=self.n_hidden,
+        activation_fn=tf.nn.relu,
+        in_layers=[self.atom_features])
     message_passing = MessagePassing(
         self.T,
         message_fn='enn',
         update_fn='gru',
         n_hidden=self.n_hidden,
-        in_layers=[self.atom_features, self.pair_features, self.atom_to_pair])
+        in_layers=[atom_features, self.pair_features, self.atom_to_pair])
 
     atom_embeddings = Dense(self.n_hidden, in_layers=[message_passing])
 
