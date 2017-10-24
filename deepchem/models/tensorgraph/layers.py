@@ -837,6 +837,79 @@ class GRU(Layer):
     self.out_tensor, self.rnn_initial_states, self.rnn_final_states, self.rnn_zero_states = tensor
 
 
+class LSTM(Layer):
+  """LSTM layer.
+
+  This layer expects its input to be of shape (batch_size, sequence_length, ...).
+  It consists of a set of independent sequence (one for each element in the batch),
+  that are each propagated independently through the LSTM.
+  """
+
+  def __init__(self, n_hidden, batch_size, **kwargs):
+    """Create a LSTM layer.
+
+    Parameters
+    ----------
+    n_hidden: int
+      the size of the LSTM's hidden state and cell state, which also determines the size of its output
+    batch_size: int
+      the batch size that will be used with this layer
+    """
+    self.n_hidden = n_hidden
+    self.batch_size = batch_size
+    super(LSTM, self).__init__(**kwargs)
+    try:
+      parent_shape = self.in_layers[0].shape
+      self._shape = (batch_size, parent_shape[1], n_hidden)
+    except:
+      pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    """ in_layers should be in the order of: 
+    inputs, initial cell state(optional), initial hidden state(optional)
+    """
+    if in_layers is None:
+      in_layers = self.in_layers
+    in_layers = convert_to_layers(in_layers)
+    inputs = self._get_input_tensors(in_layers)
+    assert len(inputs) >= 1, "Must have more than one parent"
+    parent_tensor = inputs[0]
+    lstm = tf.contrib.rnn.BasicLSTMCell(self.n_hidden)
+    if len(inputs) > 1:
+      current_state = inputs[1]
+    else:
+      current_state = tf.zeros([self.batch_size, self.n_hidden])
+    if len(inputs) > 2:
+      # 
+      hidden_state = inputs[2]
+    else:
+      hidden_state = tf.zeros([self.batch_size, self.n_hidden])
+      
+    initial_state = tf.contrib.rnn.LSTMStateTuple(current_state, hidden_state)
+    
+    out_tensor, final_state = tf.nn.dynamic_rnn(
+        lstm, parent_tensor, initial_state=initial_state, scope=self.name)
+    
+    if set_tensors:
+      self._record_variable_scope(self.name)
+      self.out_tensor = out_tensor
+      self.rnn_initial_states.append(initial_state)
+      self.rnn_final_states.append(final_state)
+    return out_tensor
+
+  def none_tensors(self):
+    saved_tensors = [
+        self.out_tensor, self.rnn_initial_states, self.rnn_final_states
+    ]
+    self.out_tensor = None
+    self.rnn_initial_states = []
+    self.rnn_final_states = []
+    return saved_tensors
+
+  def set_tensors(self, tensor):
+    self.out_tensor, self.rnn_initial_states, self.rnn_final_states = tensor
+    
+    
 class TimeSeriesDense(Layer):
 
   def __init__(self, out_channels, **kwargs):
@@ -949,7 +1022,7 @@ class SoftMax(Layer):
   def __init__(self, in_layers=None, **kwargs):
     super(SoftMax, self).__init__(in_layers, **kwargs)
     try:
-      self._shape = tuple(self.in_layers[0].shape)
+      self._shape = tuple(self.in_layers[:-1].shape)
     except:
       pass
 
@@ -1271,7 +1344,7 @@ class SparseSoftMaxCrossEntropy(Layer):
   def __init__(self, in_layers=None, **kwargs):
     super(SparseSoftMaxCrossEntropy, self).__init__(in_layers, **kwargs)
     try:
-      self._shape = (self.in_layers[1].shape[0], 1)
+      self._shape = (reduce(lambda x,y:x*y, self.in_layers[1].shape[:-1]), 1)
     except:
       pass
 
