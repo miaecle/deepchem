@@ -686,7 +686,7 @@ class IRVTransformer():
         # the tf graph here pick up the (K+1) highest similarity values
         # and their indices
         top_label = tf.gather(labels_tf, indice)
-        # map the indices to labels
+      # map the indices to labels
       feed_dict = {}
       with tf.Session() as sess:
         for count in range(target_len // 100 + 1):
