@@ -8,9 +8,9 @@ Created on Mon Oct 16 15:11:10 2017
 
 import deepchem as dc
 import tensorflow as tf
-_, datasets, _ = dc.molnet.load_qm8_molgen(featurizer='Weave', split='random')
+_, datasets, _ = dc.molnet.load_qm9_molgen(featurizer='Weave')
 
-model_dir = '/home/zqwu/deepchem/examples/molgen/qm8_molgen/'
+model_dir = '/home/zqwu/deepchem/examples/molgen/qm9_molgen/'
 model = dc.models.MolGeneratorVAE(
     atom_case=['End', 'C', 'N', 'O'],
     bond_case=['N/A', 'Single', 'Double', 'Triple', 'Aromatic'],
@@ -25,4 +25,8 @@ model = dc.models.MolGeneratorVAE(
     model_dir=model_dir)
 model.build()
 
+with model._get_tf("Graph").as_default():
+  saver = tf.train.Saver()
+  saver.restore(model.session, model_dir + 'model-214999')
+      
 model.fit(datasets[0], nb_epoch=10000, checkpoint_interval=5000)

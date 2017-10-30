@@ -16,8 +16,9 @@ from deepchem.data import NumpyDataset
 from deepchem.feat.graph_features import ConvMolFeaturizer
 from deepchem.feat.mol_graphs import ConvMol
 from deepchem.metrics import to_one_hot, from_one_hot
-from deepchem.models.tensorgraph.graph_layers import WeaveGather, SetGather, PairMap
-from deepchem.models.tensorgraph.graph_layers import WeaveLayerFactory, MergeLoss
+from deepchem.models.tensorgraph.graph_layers import WeaveGather, SetGather
+from deepchem.models.tensorgraph.graph_layers import WeaveLayerFactory
+from deepchem.models.tensorgraph.molgen_layers import PairMap, GenerateLatent, MergeLoss, KLDivergence
 from deepchem.models.tensorgraph.layers import Dense, Concat, SoftMax, \
   SoftMaxCrossEntropy, GraphConv, BatchNorm, LSTM, SparseSoftMaxCrossEntropy, \
   WeightedError, Dropout, BatchNormalization, Stack, Flatten, Reshape, Constant
@@ -26,12 +27,13 @@ from deepchem.models.tensorgraph.layers import TensorWrapper
 from deepchem.models.tensorgraph.tensor_graph import TensorGraph
 from deepchem.trans import undo_transforms
 
+
 class MolGeneratorTensorGraph(TensorGraph):
 
   def __init__(self,
                atom_case=['End', 'C', 'N', 'O', 'S', 'F', 'P', 'Cl', 'Br', 'I'],
                bond_case=['N/A', 'Single', 'Double', 'Triple', 'Aromatic'],
-               lambd = 1.,
+               lambd=1.,
                n_atom_feat=75,
                n_pair_feat=14,
                n_hidden=64,
@@ -70,12 +72,15 @@ class MolGeneratorTensorGraph(TensorGraph):
     self.build_graph()
 
   def build_graph(self):
-    self.atom_features = Feature(shape=(None, self.n_atom_feat))
-    self.pair_features = Feature(shape=(None, self.n_pair_feat))
-    self.pair_split = Feature(shape=(None,), dtype=tf.int32)
-    self.atom_split = Feature(shape=(None,), dtype=tf.int32)
-    self.atom_to_pair = Feature(shape=(None, 2), dtype=tf.int32)
-    weave_layer1A, weave_layer1P = WeaveLayerFactory(
+    self.atom_features = Feature(
+        shape=(None, self.n_atom_feat), name='atom_features')
+    self.pair_features = Feature(
+        shape=(None, self.n_pair_feat), name='pair_features')
+    self.pair_split = Feature(shape=(None,), dtype=tf.int32, name='pair_split')
+    self.atom_split = Feature(shape=(None,), dtype=tf.int32, name='atom_split')
+    self.atom_to_pair = Feature(
+        shape=(None, 2), dtype=tf.int32, name='atom_to_pair')
+    self.weave_layer1A, self.weave_layer1P = WeaveLayerFactory(
         n_atom_input_feat=self.n_atom_feat,
         n_pair_input_feat=self.n_pair_feat,
         n_atom_output_feat=self.n_hidden,
@@ -83,65 +88,92 @@ class MolGeneratorTensorGraph(TensorGraph):
         in_layers=[
             self.atom_features, self.pair_features, self.pair_split,
             self.atom_to_pair
-        ])
-    weave_layer2A, weave_layer2P = WeaveLayerFactory(
+        ],
+        name='weave_1')
+    self.weave_layer2A, self.weave_layer2P = WeaveLayerFactory(
         n_atom_input_feat=self.n_hidden,
         n_pair_input_feat=self.n_hidden,
         n_atom_output_feat=self.n_hidden,
         n_pair_output_feat=self.n_hidden,
         update_pair=False,
         in_layers=[
-            weave_layer1A, weave_layer1P, self.pair_split, self.atom_to_pair
-        ])
-    dense1 = Dense(
+            self.weave_layer1A, self.weave_layer1P, self.pair_split,
+            self.atom_to_pair
+        ],
+        name='weave_2')
+    self.dense1 = Dense(
         out_channels=self.n_graph_feat,
         activation_fn=tf.nn.tanh,
-        in_layers=weave_layer2A)
-    batch_norm1 = BatchNormalization(epsilon=1e-5, mode=1, in_layers=[dense1])
-    weave_gather = WeaveGather(
+        in_layers=self.weave_layer2A,
+        name='dense1')
+    self.batch_norm1 = BatchNormalization(
+        epsilon=1e-5, mode=1, in_layers=[self.dense1], name='bn1')
+    self.weave_gather = WeaveGather(
         self.batch_size,
         n_input=self.n_graph_feat,
         gaussian_expand=True,
-        in_layers=[batch_norm1, self.atom_split])
-    
-    
-    zero_inputs = Constant(np.zeros((self.batch_size, self.output_max_out, self.n_graph_feat)))
+        in_layers=[self.batch_norm1, self.atom_split],
+        name='weave_gather')
+
+    zero_inputs = Constant(
+        np.zeros((self.batch_size, self.output_max_out, self.n_graph_feat)))
     self.atom_vectors_out = LSTM(
         self.n_graph_feat,
         self.batch_size,
-        in_layers=[zero_inputs, weave_gather])
-    
-    # Atom numbers outputs and loss
-    atom_numbers = Dense(len(self.atom_case), in_layers=[self.atom_vectors_out])
-    self.atom_numbers_label = Label(shape=(self.batch_size, self.output_max_out), 
-                               dtype=tf.int32)
-    
-    atom_numbers_softmax = SoftMax(in_layers=[atom_numbers])
-    self.add_output(atom_numbers_softmax)
-    
-    atom_numbers_cost = SparseSoftMaxCrossEntropy(in_layers=[self.atom_numbers_label, atom_numbers])
-    self.weights = Weights(shape=(self.batch_size, self.output_max_out))
-    atom_numbers_weights = Reshape([-1, 1], in_layers=[self.weights])
-    self.atom_numbers_loss = WeightedError(in_layers=[atom_numbers_cost, atom_numbers_weights])
-    
-    # Connectivity outputs and loss
-    pair_map = PairMap(in_layers=[self.atom_vectors_out])
-    self.connectivity = Dense(len(self.bond_case), in_layers=[pair_map])
-    self.bonds_label = Label(shape=(self.batch_size, self.output_max_out, self.output_max_out), 
-                               dtype=tf.int32)
-    
-    bonds_softmax = SoftMax(in_layers=[self.connectivity])
-    self.add_output(bonds_softmax)
-    
-    bonds_cost = SparseSoftMaxCrossEntropy(in_layers=[self.bonds_label, self.connectivity])
-    bonds_weights = PairMap(in_layers=[self.weights])
-    bonds_weights = Reshape([-1, 1], in_layers=[bonds_weights])
-    self.bonds_loss = WeightedError(in_layers=[bonds_cost, bonds_weights])
-    
-    self.all_loss = MergeLoss(self.lambd, in_layers=[self.atom_numbers_loss,
-                                                self.bonds_loss])
-    self.set_loss(self.all_loss)
+        in_layers=[zero_inputs, self.weave_gather])
 
+    # Atom numbers outputs and loss
+    self.atom_numbers = Dense(
+        len(self.atom_case),
+        in_layers=[self.atom_vectors_out],
+        name='atom_numbers')
+    self.atom_numbers_label = Label(
+        shape=(self.batch_size, self.output_max_out),
+        dtype=tf.int32,
+        name='atom_numbers_label')
+
+    self.atom_numbers_softmax = SoftMax(
+        in_layers=[self.atom_numbers], name='atom_numbers_softmax')
+    self.add_output(self.atom_numbers_softmax)
+
+    self.atom_numbers_cost = SparseSoftMaxCrossEntropy(
+        in_layers=[self.atom_numbers_label, self.atom_numbers],
+        name='atom_numbers_cost')
+    self.weights = Weights(
+        shape=(self.batch_size, self.output_max_out), name='weights')
+    self.atom_numbers_weights = Reshape(
+        [-1, 1], in_layers=[self.weights], name='atom_numbers_weights')
+    self.atom_numbers_loss = WeightedError(
+        in_layers=[self.atom_numbers_cost, self.atom_numbers_weights],
+        name='atom_numbers_loss')
+
+    # Connectivity outputs and loss
+    self.pair_map = PairMap(in_layers=[self.atom_vectors_out], name='pair_map')
+    self.connectivity = Dense(
+        len(self.bond_case), in_layers=[self.pair_map], name='connectivity')
+    self.bonds_label = Label(
+        shape=(self.batch_size, self.output_max_out, self.output_max_out),
+        dtype=tf.int32,
+        name='bonds_label')
+
+    self.bonds_softmax = SoftMax(
+        in_layers=[self.connectivity], name='bonds_softmax')
+    self.add_output(self.bonds_softmax)
+
+    self.bonds_cost = SparseSoftMaxCrossEntropy(
+        in_layers=[self.bonds_label, self.connectivity], name='bonds_cost')
+    self.bonds_weights_pair = PairMap(
+        in_layers=[self.weights], name='bonds_weights_pair')
+    self.bonds_weights = Reshape(
+        [-1, 1], in_layers=[self.bonds_weights_pair], name='bonds_weights')
+    self.bonds_loss = WeightedError(
+        in_layers=[self.bonds_cost, self.bonds_weights], name='bonds_loss')
+
+    self.all_loss = MergeLoss(
+        self.lambd,
+        in_layers=[self.atom_numbers_loss, self.bonds_loss],
+        name='all_loss')
+    self.set_loss(self.all_loss)
 
   def default_generator(self,
                         dataset,
@@ -193,7 +225,7 @@ class MolGeneratorTensorGraph(TensorGraph):
           atom_numbers_label, bonds_label = self.generate_label(mol)
           atom_numbers_labels.append(atom_numbers_label)
           bonds_labels.append(bonds_label)
-        
+
         # Padding
         n_valid_samples = len(atom_feat)
         for i in range(self.batch_size - n_valid_samples):
@@ -216,23 +248,29 @@ class MolGeneratorTensorGraph(TensorGraph):
           atom_numbers_label, bonds_label = self.generate_label(mol)
           atom_numbers_labels.append(atom_numbers_label)
           bonds_labels.append(bonds_label)
-        
+
         feed_dict[self.atom_features] = np.concatenate(atom_feat, axis=0)
         feed_dict[self.pair_features] = np.concatenate(pair_feat, axis=0)
         feed_dict[self.pair_split] = np.array(pair_split)
         feed_dict[self.atom_split] = np.array(atom_split)
         feed_dict[self.atom_to_pair] = np.concatenate(atom_to_pair, axis=0)
         feed_dict[self.bonds_label] = np.stack(bonds_labels, axis=0)
-        feed_dict[self.atom_numbers_label] = np.stack(atom_numbers_labels, axis=0)
-        feed_dict[self.weights] = np.concatenate([np.ones((n_valid_samples, self.output_max_out)),
-                 np.zeros((self.batch_size - n_valid_samples, self.output_max_out))], axis=0)
-        
+        feed_dict[self.atom_numbers_label] = np.stack(
+            atom_numbers_labels, axis=0)
+        feed_dict[self.weights] = np.concatenate(
+            [
+                np.ones((n_valid_samples, self.output_max_out)),
+                np.zeros((self.batch_size - n_valid_samples,
+                          self.output_max_out))
+            ],
+            axis=0)
+
         yield feed_dict
 
   def generate_label(self, mol):
 
     bonds = mol.get_pair_features()[:, :, :4]
-    bonds = np.concatenate([np.zeros_like(bonds)[:,:, :1], bonds], axis=2)
+    bonds = np.concatenate([np.zeros_like(bonds)[:, :, :1], bonds], axis=2)
     bonds = from_one_hot(bonds, axis=2)
     atom_numbers = from_one_hot(mol.get_atom_features()[:, :44])
     n_atoms = len(atom_numbers)
@@ -242,8 +280,7 @@ class MolGeneratorTensorGraph(TensorGraph):
         np.pad(bonds[:, order][order, :], ((0, self.output_max_out - n_atoms),
                                            (0, self.output_max_out - n_atoms)),
                'constant')
-    
-    
+
   def tokenize(self, atom_numbers):
     symbol_dict = [
         'C',
@@ -334,12 +371,14 @@ class MolGeneratorTensorGraph(TensorGraph):
     for i in range(atoms_pred.shape[0]):
       output_mols.append(self.rebuild_mol(atoms_pred[i], bonds_pred[i]))
     return output_mols
-  
+
   def rebuild_mol(self, atoms, bonds):
-    _bondtypes = {1: Chem.BondType.SINGLE,
-                  2: Chem.BondType.DOUBLE,
-                  3: Chem.BondType.TRIPLE,
-                  4: Chem.BondType.AROMATIC}
+    _bondtypes = {
+        1: Chem.BondType.SINGLE,
+        2: Chem.BondType.DOUBLE,
+        3: Chem.BondType.TRIPLE,
+        4: Chem.BondType.AROMATIC
+    }
     try:
       mol = Chem.Mol()
       edmol = Chem.EditableMol(mol)
@@ -351,11 +390,173 @@ class MolGeneratorTensorGraph(TensorGraph):
         rdatom = Chem.Atom(atom)
         edmol.AddAtom(rdatom)
       for i in range(end):
-        for j in range(i+1, end):
+        for j in range(i + 1, end):
           if bonds[i, j] > 0:
-            edmol.AddBond(i, j, _bondtypes[bonds[i,j]])
+            edmol.AddBond(i, j, _bondtypes[bonds[i, j]])
       mol = edmol.GetMol()
       Chem.SanitizeMol(mol)
       return mol
     except:
       return None
+
+
+class MolGeneratorVAE(MolGeneratorTensorGraph):
+
+  def __init__(self, n_latent=128, **kwargs):
+    self.n_latent = n_latent
+    super(MolGeneratorVAE, self).__init__(**kwargs)
+
+  def build_graph(self):
+    self.atom_features = Feature(
+        shape=(None, self.n_atom_feat), name='atom_features')
+    self.pair_features = Feature(
+        shape=(None, self.n_pair_feat), name='pair_features')
+    self.pair_split = Feature(shape=(None,), dtype=tf.int32, name='pair_split')
+    self.atom_split = Feature(shape=(None,), dtype=tf.int32, name='atom_split')
+    self.atom_to_pair = Feature(
+        shape=(None, 2), dtype=tf.int32, name='atom_to_pair')
+    self.weave_layer1A, self.weave_layer1P = WeaveLayerFactory(
+        n_atom_input_feat=self.n_atom_feat,
+        n_pair_input_feat=self.n_pair_feat,
+        n_atom_output_feat=self.n_hidden,
+        n_pair_output_feat=self.n_hidden,
+        in_layers=[
+            self.atom_features, self.pair_features, self.pair_split,
+            self.atom_to_pair
+        ],
+        name='weave_1')
+    self.weave_layer2A, self.weave_layer2P = WeaveLayerFactory(
+        n_atom_input_feat=self.n_hidden,
+        n_pair_input_feat=self.n_hidden,
+        n_atom_output_feat=self.n_hidden,
+        n_pair_output_feat=self.n_hidden,
+        update_pair=False,
+        in_layers=[
+            self.weave_layer1A, self.weave_layer1P, self.pair_split,
+            self.atom_to_pair
+        ],
+        name='weave_2')
+    self.dense1 = Dense(
+        out_channels=self.n_graph_feat,
+        activation_fn=tf.nn.tanh,
+        in_layers=self.weave_layer2A,
+        name='dense1')
+    self.batch_norm1 = BatchNormalization(
+        epsilon=1e-5, mode=1, in_layers=[self.dense1], name='bn1')
+    self.weave_gather = WeaveGather(
+        self.batch_size,
+        n_input=self.n_graph_feat,
+        gaussian_expand=True,
+        in_layers=[self.batch_norm1, self.atom_split],
+        name='weave_gather')
+
+    self.before_latent = Dense(
+        out_channels=self.n_graph_feat,
+        activation_fn=tf.nn.relu,
+        in_layers=[self.weave_gather],
+        name='before_latent')
+
+    self.latent_mean = Dense(
+        out_channels=self.n_latent,
+        in_layers=[self.before_latent],
+        name='latent_mean')
+
+    self.latent_log_var = Dense(
+        out_channels=self.n_latent,
+        in_layers=[self.before_latent],
+        name='latent_log_var')
+
+    self.eps = Feature(shape=(None, self.n_latent), name='eps')
+    self.latent = GenerateLatent(
+        in_layers=[self.latent_mean, self.latent_log_var, self.eps],
+        name='latent')
+    
+    self.kl_loss = KLDivergence(
+        in_layers=[self.latent_mean, self.latent_log_var],
+        name='kl_loss')
+
+    zero_inputs = Constant(
+        np.zeros((self.batch_size, self.output_max_out, self.n_latent)),
+        name='zero_inputs')
+    self.atom_vectors_out = LSTM(
+        self.n_latent,
+        self.batch_size,
+        in_layers=[zero_inputs, self.latent],
+        name='LSTM')
+
+    # Atom numbers outputs and loss
+    self.atom_numbers = Dense(
+        len(self.atom_case),
+        in_layers=[self.atom_vectors_out],
+        name='atom_numbers')
+    self.atom_numbers_label = Label(
+        shape=(self.batch_size, self.output_max_out),
+        dtype=tf.int32,
+        name='atom_numbers_label')
+
+    self.atom_numbers_softmax = SoftMax(
+        in_layers=[self.atom_numbers], name='atom_numbers_softmax')
+    self.add_output(self.atom_numbers_softmax)
+
+    self.atom_numbers_cost = SparseSoftMaxCrossEntropy(
+        in_layers=[self.atom_numbers_label, self.atom_numbers],
+        name='atom_numbers_cost')
+    self.weights = Weights(
+        shape=(self.batch_size, self.output_max_out), name='weights')
+    self.atom_numbers_weights = Reshape(
+        [-1, 1], in_layers=[self.weights], name='atom_numbers_weights')
+    self.atom_numbers_loss = WeightedError(
+        in_layers=[self.atom_numbers_cost, self.atom_numbers_weights],
+        name='atom_numbers_loss')
+
+    # Connectivity outputs and loss
+    self.pair_map = PairMap(in_layers=[self.atom_vectors_out], name='pair_map')
+    self.connectivity = Dense(
+        len(self.bond_case), in_layers=[self.pair_map], name='connectivity')
+    self.bonds_label = Label(
+        shape=(self.batch_size, self.output_max_out, self.output_max_out),
+        dtype=tf.int32,
+        name='bonds_label')
+
+    self.bonds_softmax = SoftMax(
+        in_layers=[self.connectivity], name='bonds_softmax')
+    self.add_output(self.bonds_softmax)
+
+    self.bonds_cost = SparseSoftMaxCrossEntropy(
+        in_layers=[self.bonds_label, self.connectivity], name='bonds_cost')
+    self.bonds_weights_pair = PairMap(
+        in_layers=[self.weights], name='bonds_weights_pair')
+    self.bonds_weights = Reshape(
+        [-1, 1], in_layers=[self.bonds_weights_pair], name='bonds_weights')
+    self.bonds_loss = WeightedError(
+        in_layers=[self.bonds_cost, self.bonds_weights], name='bonds_loss')
+
+    self.classification_loss = MergeLoss(
+        self.lambd,
+        in_layers=[self.atom_numbers_loss, self.bonds_loss],
+        name='classification_loss')
+    self.all_loss = MergeLoss(
+        1,
+        in_layers=[self.classification_loss, self.kl_loss],
+        name='all_loss')
+    self.set_loss(self.all_loss)
+
+  def default_generator(self,
+                        dataset,
+                        epochs=1,
+                        predict=False,
+                        deterministic=True,
+                        pad_batches=True):
+    generator = super(MolGeneratorVAE, self).default_generator(
+        dataset,
+        epochs=epochs,
+        predict=predict,
+        deterministic=deterministic,
+        pad_batches=pad_batches)
+    for feed_dict in generator:
+      if predict:
+        feed_dict[self.eps] = np.zeros((self.batch_size, self.n_latent))
+      else:
+        feed_dict[self.eps] = np.random.normal(0, 1, (self.batch_size,
+                                                      self.n_latent))
+      yield feed_dict

@@ -33,4 +33,4 @@ from deepchem.models.tensorgraph.models.symmetry_function_regression import BPSy
 
 from deepchem.models.tensorgraph.models.seqtoseq import SeqToSeq
 from deepchem.models.tensorgraph.models.text_cnn import TextCNNTensorGraph
-from deepchem.models.tensorgraph.models.mol_gen import MolGeneratorTensorGraph
+from deepchem.models.tensorgraph.models.mol_gen import MolGeneratorTensorGraph, MolGeneratorVAE
