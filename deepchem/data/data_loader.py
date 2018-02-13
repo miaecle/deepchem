@@ -19,6 +19,7 @@ import sys
 from deepchem.utils.save import log
 from deepchem.utils.save import load_csv_files
 from deepchem.utils.save import load_sdf_files
+from deepchem.utils.save import encode_fasta_sequence
 from deepchem.feat import UserDefinedFeaturizer
 from deepchem.data import DiskDataset
 
@@ -77,7 +78,7 @@ def featurize_smiles_df(df, featurizer, field, log_every_N=1000, verbose=True):
   valid_inds = np.array(
       [1 if elt.size > 0 else 0 for elt in features], dtype=bool)
   features = [elt for (is_valid, elt) in zip(valid_inds, features) if is_valid]
-  return np.squeeze(np.array(features)), valid_inds
+  return np.squeeze(np.array(features), axis=1), valid_inds
 
 
 def featurize_smiles_np(arr, featurizer, log_every_N=1000, verbose=True):
@@ -101,8 +102,7 @@ def featurize_smiles_np(arr, featurizer, log_every_N=1000, verbose=True):
       [1 if elt.size > 0 else 0 for elt in features], dtype=bool)
   features = [elt for (is_valid, elt) in zip(valid_inds, features) if is_valid]
   features = np.squeeze(np.array(features))
-  return features.reshape(
-      -1,)
+  return features.reshape(-1,)
 
 
 def get_user_specified_features(df, featurizer, verbose=True):
@@ -187,7 +187,20 @@ class DataLoader(object):
     self.log_every_n = log_every_n
 
   def featurize(self, input_files, data_dir=None, shard_size=8192):
-    """Featurize provided files and write to specified location."""
+    """Featurize provided files and write to specified location.
+    
+    For large datasets, automatically shards into smaller chunks
+    for convenience.
+
+    Parameters
+    ----------
+    input_files: list
+      List of input filenames.
+    data_dir: str
+      (Optional) Directory to store featurized dataset.
+    shard_size: int
+      (Optional) Number of examples stored in each shard.
+    """
     log("Loading raw samples now.", self.verbose)
     log("shard_size: %d" % shard_size, self.verbose)
 
@@ -281,3 +294,35 @@ class SDFLoader(DataLoader):
     log("Currently featurizing feature_type: %s" %
         self.featurizer.__class__.__name__, self.verbose)
     return featurize_mol_df(shard, self.featurizer, field=self.mol_field)
+
+
+class FASTALoader(DataLoader):
+  """
+  Handles loading of FASTA files.
+  """
+
+  def __init__(self, verbose=True):
+    """Initialize loader."""
+    self.verbose = verbose
+
+  def featurize(self, input_files, data_dir=None):
+    """Featurizes fasta files.
+
+    Parameters
+    ----------
+    input_files: list
+      List of fasta files.
+    data_dir: str
+      (Optional) Name of directory where featurized data is stored.
+    """
+    if not isinstance(input_files, list):
+      input_files = [input_files]
+
+    def shard_generator():
+      for input_file in input_files:
+        X = encode_fasta_sequence(input_file)
+        ids = np.ones(len(X))
+        # (X, y, w, ids)
+        yield X, None, None, ids
+
+    return DiskDataset.create_dataset(shard_generator(), data_dir)

@@ -491,7 +491,7 @@ class PowerTransformer(Transformer):
   def untransform(self, z):
     # print("Cannot undo Power Transformer, for now.")
     n_powers = len(self.powers)
-    orig_len = (z.shape[1]) / n_powers
+    orig_len = (z.shape[1]) // n_powers
     z = z[:, :orig_len]
     z = np.power(z, 1 / self.powers[0])
     return z
@@ -511,7 +511,7 @@ class CoulombFitTransformer(Transformer):
      >>> w = np.ones((n_samples, n_tasks))
      >>> dataset = dc.data.NumpyDataset(X, y, w, ids)
      >>> fit_transformers = [dc.trans.CoulombFitTransformer(dataset)]
-     >>> model = dc.models.TensorflowMultiTaskFitTransformRegressor(n_tasks,
+     >>> model = dc.models.MultiTaskFitTransformRegressor(n_tasks,
      ...    [n_features, n_features], batch_size=n_samples, fit_transformers=fit_transformers, n_evals=1)
      n_features after fit_transform: 12
   """
@@ -556,8 +556,8 @@ class CoulombFitTransformer(Transformer):
 
     def _realize_(x):
       assert (len(x.shape) == 2)
-      inds = np.argsort(-(x**2).sum(axis=0)**.5 + np.random.normal(
-          0, self.noise, x[0].shape))
+      inds = np.argsort(
+          -(x**2).sum(axis=0)**.5 + np.random.normal(0, self.noise, x[0].shape))
       x = x[inds, :][:, inds] * 1
       x = x.flatten()[self.triuind]
       return x
@@ -736,8 +736,8 @@ class IRVTransformer():
     print('start similarity calculation')
     time1 = time.time()
     similarity = IRVTransformer.matrix_mul(X_target, np.transpose(self.X)) / (
-        n_features - IRVTransformer.matrix_mul(1 - X_target,
-                                               np.transpose(1 - self.X)))
+        n_features -
+        IRVTransformer.matrix_mul(1 - X_target, np.transpose(1 - self.X)))
     time2 = time.time()
     print('similarity calculation takes %i s' % (time2 - time1))
     for i in range(self.n_tasks):
@@ -784,8 +784,8 @@ class IRVTransformer():
     X_trans = []
     for count in range(X_length // 5000 + 1):
       X_trans.append(
-          self.X_transform(dataset.X[count * 5000:min((count + 1) * 5000,
-                                                      X_length), :]))
+          self.X_transform(
+              dataset.X[count * 5000:min((count + 1) * 5000, X_length), :]))
     X_trans = np.concatenate(X_trans, axis=0)
     return NumpyDataset(X_trans, dataset.y, dataset.w, ids=None)
 
@@ -993,7 +993,9 @@ class ANITransformer(Transformer):
         end = min((start + 1) * batch_size, X.shape[0])
         X_batch = X[(start * batch_size):end]
         output = self.sess.run(
-            [self.outputs], feed_dict={self.inputs: X_batch})[0]
+            [self.outputs], feed_dict={
+                self.inputs: X_batch
+            })[0]
         X_out.append(output)
         num_transformed = num_transformed + X_batch.shape[0]
         print('%i samples transformed' % num_transformed)
@@ -1108,8 +1110,8 @@ class ANITransformer(Transformer):
     f_R_ik = tf.stack([d_cutoff] * max_atoms, axis=2)
 
     # Define angle theta = arccos(R_ij(Vector) dot R_ik(Vector)/R_ij(distance)/R_ik(distance))
-    vector_mul = tf.reduce_sum(tf.stack([vector_distances]*max_atoms, axis=3) * \
-        tf.stack([vector_distances]*max_atoms, axis=2), axis=4)
+    vector_mul = tf.reduce_sum(tf.stack([vector_distances] * max_atoms, axis=3) * \
+                               tf.stack([vector_distances] * max_atoms, axis=2), axis=4)
     vector_mul = vector_mul * tf.sign(f_R_ij) * tf.sign(f_R_ik)
     theta = tf.acos(tf.div(vector_mul, R_ij * R_ik + 1e-5))
 
@@ -1119,8 +1121,8 @@ class ANITransformer(Transformer):
     f_R_ik = tf.stack([f_R_ik] * length, axis=4)
     theta = tf.stack([theta] * length, axis=4)
 
-    out_tensor = tf.pow((1. + tf.cos(theta - thetas))/2., zeta) * \
-        tf.exp(-ita * tf.square((R_ij + R_ik)/2. - Rs)) * f_R_ij * f_R_ik * 2
+    out_tensor = tf.pow((1. + tf.cos(theta - thetas)) / 2., zeta) * \
+                 tf.exp(-ita * tf.square((R_ij + R_ik) / 2. - Rs)) * f_R_ij * f_R_ik * 2
 
     if self.atomic_number_differentiated:
       out_tensors = []
@@ -1139,3 +1141,30 @@ class ANITransformer(Transformer):
   def get_num_feats(self):
     n_feat = self.outputs.get_shape().as_list()[-1]
     return n_feat
+
+
+class FeaturizationTransformer(Transformer):
+  """
+  A transformer which runs a featurizer over the X values of a dataset.
+  Datasets used by this transformer must have rdkit.mol objects as the X
+  values
+  """
+
+  def __init__(self,
+               transform_X=False,
+               transform_y=False,
+               transform_w=False,
+               dataset=None,
+               featurizer=None):
+    self.featurizer = featurizer
+    if not transform_X:
+      raise ValueError("FeaturizingTransfomer can only be used on X")
+    super(FeaturizationTransformer, self).__init__(
+        transform_X=transform_X,
+        transform_y=transform_y,
+        transform_w=transform_w,
+        dataset=dataset)
+
+  def transform_array(self, X, y, w):
+    X = self.featurizer.featurize(X)
+    return X, y, w

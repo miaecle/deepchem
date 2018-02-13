@@ -1,5 +1,5 @@
 """
-Script that trains graph-conv models on Tox21 dataset.
+Script that trains graph-conv models on SAMPL(FreeSolv) dataset.
 """
 from __future__ import print_function
 from __future__ import division
@@ -10,9 +10,9 @@ np.random.seed(123)
 import tensorflow as tf
 tf.set_random_seed(123)
 import deepchem as dc
-from sampl_datasets import load_sampl
+from deepchem.molnet import load_sampl
 
-# Load Tox21 dataset
+# Load SAMPL(FreeSolv) dataset
 SAMPL_tasks, SAMPL_datasets, transformers = load_sampl(featurizer='GraphConv')
 train_dataset, valid_dataset, test_dataset = SAMPL_datasets
 

@@ -10,7 +10,7 @@ import shutil
 import numpy as np
 import deepchem as dc
 import time
-from tox21_datasets import load_tox21
+from deepchem.molnet import load_tox21
 
 # Only for debug!
 np.random.seed(123)
@@ -30,16 +30,10 @@ for transformer in transformers:
   test_dataset = transformer.transform(test_dataset)
 
 model = dc.models.TensorflowMultiTaskIRVClassifier(
-    len(tox21_tasks),
-    K=K,
-    learning_rate=0.001,
-    penalty=0.05,
-    batch_size=32,
-    fit_transformers=[])
+    len(tox21_tasks), K=K, learning_rate=0.001, penalty=0.05, batch_size=32)
 
 # Fit trained model
 model.fit(train_dataset, nb_epoch=10)
-model.save()
 
 print("Evaluating model")
 train_scores = model.evaluate(train_dataset, [metric], transformers)

@@ -211,6 +211,7 @@ class Layer(object):
     Instead, the input to the first dense layer will be a different layer
     specified in the replacements map.
 
+    >>> new_input = Feature(shape=(None, 100))
     >>> replacements = {input: new_input}
     >>> dense3_copy = dense3.copy(replacements)
 
@@ -371,48 +372,93 @@ class Conv1D(Layer):
   """
 
   def __init__(self,
-               width,
-               out_channels,
-               stride=1,
-               padding='SAME',
-               activation_fn=tf.nn.relu,
-               biases_initializer=tf.random_normal_initializer,
-               weights_initializer=tf.random_normal_initializer,
+               filters,
+               kernel_size,
+               strides=1,
+               padding='valid',
+               dilation_rate=1,
+               activation=None,
+               use_bias=True,
+               kernel_initializer='glorot_uniform',
+               bias_initializer='zeros',
+               kernel_regularizer=None,
+               bias_regularizer=None,
+               activity_regularizer=None,
+               kernel_constraint=None,
+               bias_constraint=None,
+               in_layers=None,
                **kwargs):
-    """Create a Conv1D layer.
+    """1D convolution layer (e.g. temporal convolution).
 
-    Parameters
-    ----------
-    width: int
-      the width of the convolutional kernel
-    out_channels: int
-      the number of outputs produced by the convolutional kernel
-    stride: int
-      the stride between applications of the convolutional kernel
-    padding: str
-      the padding method to use, either 'SAME' or 'VALID'
-    activation_fn: object
-      the Tensorflow activation function to apply to the output
-    biases_initializer: callable object
-      the initializer for bias values.  This may be None, in which case the layer
-      will not include biases.
-    weights_initializer: callable object
-      the initializer for weight values
+      This layer creates a convolution kernel that is convolved
+      with the layer input over a single spatial (or temporal) dimension
+      to produce a tensor of outputs.
+      If `use_bias` is True, a bias vector is created and added to the outputs.
+      Finally, if `activation` is not `None`,
+      it is applied to the outputs as well.
+
+      When using this layer as the first layer in a model,
+      provide an `input_shape` argument
+      (tuple of integers or `None`, e.g.
+      `(10, 128)` for sequences of 10 vectors of 128-dimensional vectors,
+      or `(None, 128)` for variable-length sequences of 128-dimensional vectors.
+
+      TODO(LESWING): Calculate output shape at construction time
+      Arguments:
+          filters: Integer, the dimensionality of the output space
+              (i.e. the number output of filters in the convolution).
+          kernel_size: An integer or tuple/list of a single integer,
+              specifying the length of the 1D convolution window.
+          strides: An integer or tuple/list of a single integer,
+              specifying the stride length of the convolution.
+              Specifying any stride value != 1 is incompatible with specifying
+              any `dilation_rate` value != 1.
+          padding: One of `"valid"`, `"causal"` or `"same"` (case-insensitive).
+              `"causal"` results in causal (dilated) convolutions, e.g. output[t]
+              does not depend on input[t+1:]. Useful when modeling temporal data
+              where the model should not violate the temporal order.
+              See [WaveNet: A Generative Model for Raw Audio, section
+                2.1](https://arxiv.org/abs/1609.03499).
+          dilation_rate: an integer or tuple/list of a single integer, specifying
+              the dilation rate to use for dilated convolution.
+              Currently, specifying any `dilation_rate` value != 1 is
+              incompatible with specifying any `strides` value != 1.
+          activation: Activation function to use.
+              If you don't specify anything, no activation is applied
+              (ie. "linear" activation: `a(x) = x`).
+          use_bias: Boolean, whether the layer uses a bias vector.
+          kernel_initializer: Initializer for the `kernel` weights matrix.
+          bias_initializer: Initializer for the bias vector.
+          kernel_regularizer: Regularizer function applied to
+              the `kernel` weights matrix.
+          bias_regularizer: Regularizer function applied to the bias vector.
+          activity_regularizer: Regularizer function applied to
+              the output of the layer (its "activation")..
+          kernel_constraint: Constraint function applied to the kernel matrix.
+          bias_constraint: Constraint function applied to the bias vector.
+
+      Input shape:
+          3D tensor with shape: `(batch_size, steps, input_dim)`
+
+      Output shape:
+          3D tensor with shape: `(batch_size, new_steps, filters)`
+          `steps` value might have changed due to padding or strides.
     """
-    self.width = width
-    self.out_channels = out_channels
-    self.stride = stride
+    self.filters = filters
+    self.kernel_size = kernel_size
+    self.strides = strides
     self.padding = padding
-    self.activation_fn = activation_fn
-    self.weights_initializer = weights_initializer
-    self.biases_initializer = biases_initializer
-    self.out_tensor = None
-    super(Conv1D, self).__init__(**kwargs)
-    try:
-      parent_shape = self.in_layers[0].shape
-      self._shape = (parent_shape[0], parent_shape[1] // stride, out_channels)
-    except:
-      pass
+    self.dilation_rate = dilation_rate
+    self.activation = activation
+    self.use_bias = use_bias
+    self.kernel_initializer = kernel_initializer
+    self.bias_initializer = bias_initializer
+    self.kernel_regularizer = kernel_regularizer
+    self.bias_regularizer = bias_regularizer
+    self.activity_regularizer = activity_regularizer
+    self.kernel_constraint = kernel_constraint
+    self.bias_constraint = bias_constraint
+    super(Conv1D, self).__init__(in_layers, **kwargs)
 
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
     inputs = self._get_input_tensors(in_layers)
@@ -423,18 +469,21 @@ class Conv1D(Layer):
       parent = tf.expand_dims(parent, 2)
     elif len(parent.get_shape()) != 3:
       raise ValueError("Parent tensor must be (batch, width, channel)")
-    parent_shape = parent.get_shape()
-    parent_channel_size = parent_shape[2].value
-    f = tf.Variable(self.weights_initializer()
-                    ([self.width, parent_channel_size, self.out_channels]))
-    t = tf.nn.conv1d(parent, f, stride=self.stride, padding=self.padding)
-    if self.biases_initializer is not None:
-      b = tf.Variable(self.biases_initializer()([self.out_channels]))
-      t = tf.nn.bias_add(t, b)
-    if self.activation_fn is None:
-      out_tensor = t
-    else:
-      out_tensor = self.activation_fn(t)
+    out_tensor = tf.keras.layers.Conv1D(
+        filters=self.filters,
+        kernel_size=self.kernel_size,
+        strides=self.strides,
+        padding=self.padding,
+        dilation_rate=self.dilation_rate,
+        activation=self.activation,
+        use_bias=self.use_bias,
+        kernel_initializer=self.kernel_initializer,
+        bias_initializer=self.bias_initializer,
+        kernel_regularizer=self.kernel_regularizer,
+        bias_regularizer=self.bias_regularizer,
+        activity_regularizer=self.activity_regularizer,
+        kernel_constraint=self.kernel_constraint,
+        bias_constraint=self.bias_constraint)(parent)
     if set_tensors:
       self._record_variable_scope(self.name)
       self.out_tensor = out_tensor
@@ -643,6 +692,38 @@ class Reshape(Layer):
     return out_tensor
 
 
+class Cast(Layer):
+  """
+  Wrapper around tf.cast.  Changes the dtype of a single layer
+  """
+
+  def __init__(self, in_layers=None, dtype=None, **kwargs):
+    """
+    Parameters
+    ----------
+    dtype: tf.DType
+      the dtype to cast the in_layer to
+      e.x. tf.int32
+    """
+    if dtype is None:
+      raise ValueError("Must cast to a dtype")
+    self.dtype = dtype
+    super(Cast, self).__init__(in_layers, **kwargs)
+    try:
+      parent_shape = self.in_layers[0].shape
+      self._shape = parent_shape
+    except:
+      pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    inputs = self._get_input_tensors(in_layers)
+    parent_tensor = inputs[0]
+    out_tensor = tf.cast(parent_tensor, self.dtype)
+    if set_tensors:
+      self.out_tensor = out_tensor
+    return out_tensor
+
+
 class Squeeze(Layer):
 
   def __init__(self, in_layers=None, squeeze_dims=None, **kwargs):
@@ -654,7 +735,8 @@ class Squeeze(Layer):
         self._shape = [i for i in parent_shape if i != 1]
       else:
         self._shape = [
-            parent_shape[i] for i in range(len(parent_shape))
+            parent_shape[i]
+            for i in range(len(parent_shape))
             if i not in squeeze_dims
         ]
     except:
@@ -693,7 +775,11 @@ class Transpose(Layer):
 class CombineMeanStd(Layer):
   """Generate Gaussian nose."""
 
-  def __init__(self, in_layers=None, training_only=False, **kwargs):
+  def __init__(self,
+               in_layers=None,
+               training_only=False,
+               noise_epsilon=0.01,
+               **kwargs):
     """Create a CombineMeanStd layer.
 
     This layer should have two inputs with the same shape, and its output also has the
@@ -710,9 +796,12 @@ class CombineMeanStd(Layer):
       if True, noise is only generated during training.  During prediction, the output
       is simply equal to the first input (that is, the mean of the distribution used
       during training).
+    noise_epsilon: float
+      The standard deviation of the random noise
     """
     super(CombineMeanStd, self).__init__(in_layers, **kwargs)
     self.training_only = training_only
+    self.noise_epsilon = noise_epsilon
     try:
       self._shape = self.in_layers[0].shape
     except:
@@ -724,10 +813,10 @@ class CombineMeanStd(Layer):
       raise ValueError("Must have two in_layers")
     mean_parent, std_parent = inputs[0], inputs[1]
     sample_noise = tf.random_normal(
-        mean_parent.get_shape(), 0, 1, dtype=tf.float32)
+        mean_parent.get_shape(), 0, self.noise_epsilon, dtype=tf.float32)
     if self.training_only:
       sample_noise *= kwargs['training']
-    out_tensor = mean_parent + (std_parent * sample_noise)
+    out_tensor = mean_parent + tf.exp(std_parent * 0.5) * sample_noise
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -819,7 +908,7 @@ class GRU(Layer):
   """A Gated Recurrent Unit.
 
   This layer expects its input to be of shape (batch_size, sequence_length, ...).
-  It consists of a set of independent sequence (one for each element in the batch),
+  It consists of a set of independent sequences (one for each element in the batch),
   that are each propagated independently through the GRU.
   """
 
@@ -861,6 +950,80 @@ class GRU(Layer):
       self.rnn_initial_states.append(initial_state)
       self.rnn_final_states.append(final_state)
       self.rnn_zero_states.append(np.zeros(zero_state.get_shape(), np.float32))
+      self.out_tensors = [
+          self.out_tensor, initial_state, final_state, zero_state
+      ]
+    return out_tensor
+
+  def none_tensors(self):
+    saved_tensors = [
+        self.out_tensor, self.rnn_initial_states, self.rnn_final_states,
+        self.rnn_zero_states, self.out_tensors
+    ]
+    self.out_tensor = None
+    self.rnn_initial_states = []
+    self.rnn_final_states = []
+    self.rnn_zero_states = []
+    self.out_tensors = []
+    return saved_tensors
+
+  def set_tensors(self, tensor):
+    self.out_tensor, self.rnn_initial_states, self.rnn_final_states, self.rnn_zero_states, self.out_tensors = tensor
+
+
+class LSTM(Layer):
+  """A Long Short Term Memory.
+
+  This layer expects its input to be of shape (batch_size, sequence_length, ...).
+  It consists of a set of independent sequences (one for each element in the batch),
+  that are each propagated independently through the LSTM.
+  """
+
+  def __init__(self, n_hidden, batch_size, **kwargs):
+    """Create a Long Short Term Memory.
+
+    Parameters
+    ----------
+    n_hidden: int
+      the size of the LSTM's hidden state, which also determines the size of its output
+    batch_size: int
+      the batch size that will be used with this layer
+    """
+    self.n_hidden = n_hidden
+    self.batch_size = batch_size
+    super(LSTM, self).__init__(**kwargs)
+    try:
+      parent_shape = self.in_layers[0].shape
+      self._shape = (batch_size, parent_shape[1], n_hidden)
+    except:
+      pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    inputs = self._get_input_tensors(in_layers)
+    if len(inputs) != 1:
+      raise ValueError("Must have one parent")
+    parent_tensor = inputs[0]
+    lstm_cell = tf.contrib.rnn.LSTMCell(self.n_hidden)
+    zero_state = lstm_cell.zero_state(self.batch_size, tf.float32)
+    if set_tensors:
+      initial_state = tf.contrib.rnn.LSTMStateTuple(
+          tf.placeholder(tf.float32, zero_state.c.get_shape()),
+          tf.placeholder(tf.float32, zero_state.h.get_shape()))
+    else:
+      initial_state = zero_state
+    out_tensor, final_state = tf.nn.dynamic_rnn(
+        lstm_cell, parent_tensor, initial_state=initial_state, scope=self.name)
+    if set_tensors:
+      self._record_variable_scope(self.name)
+      self.out_tensor = out_tensor
+      self.rnn_initial_states.append(initial_state.c)
+      self.rnn_initial_states.append(initial_state.h)
+      self.rnn_final_states.append(final_state.c)
+      self.rnn_final_states.append(final_state.h)
+      self.rnn_zero_states.append(
+          np.zeros(zero_state.c.get_shape(), np.float32))
+      self.rnn_zero_states.append(
+          np.zeros(zero_state.h.get_shape(), np.float32))
     return out_tensor
 
   def none_tensors(self):
@@ -993,8 +1156,8 @@ class Input(Layer):
       self.out_tensor = out_tensor
     return out_tensor
 
-  def create_pre_q(self, batch_size):
-    q_shape = (batch_size,) + self._shape[1:]
+  def create_pre_q(self):
+    q_shape = (None,) + self._shape[1:]
     return Input(shape=q_shape, name="%s_pre_q" % self.name, dtype=self.dtype)
 
   def get_pre_q_name(self):
@@ -1020,6 +1183,12 @@ class Weights(Input):
 
 
 class L1Loss(Layer):
+  """Compute the mean absolute difference between the elements of the inputs.
+
+  This layer should have two or three inputs.  If there is a third input, the
+  difference between the first two inputs is multiplied by the third one to
+  produce a weighted error.
+  """
 
   def __init__(self, in_layers=None, **kwargs):
     super(L1Loss, self).__init__(in_layers, **kwargs)
@@ -1027,14 +1196,22 @@ class L1Loss(Layer):
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
     inputs = self._get_input_tensors(in_layers, True)
     guess, label = inputs[0], inputs[1]
-    out_tensor = tf.reduce_mean(
-        tf.abs(guess - label), axis=list(range(1, len(label.shape))))
+    l1 = tf.abs(guess - label)
+    if len(inputs) > 2:
+      l1 *= inputs[2]
+    out_tensor = tf.reduce_mean(l1, axis=list(range(1, len(label.shape))))
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
 
 
 class L2Loss(Layer):
+  """Compute the mean squared difference between the elements of the inputs.
+
+  This layer should have two or three inputs.  If there is a third input, the
+  squared difference between the first two inputs is multiplied by the third one to
+  produce a weighted error.
+  """
 
   def __init__(self, in_layers=None, **kwargs):
     super(L2Loss, self).__init__(in_layers, **kwargs)
@@ -1042,17 +1219,19 @@ class L2Loss(Layer):
       shape1 = self.in_layers[0].shape
       shape2 = self.in_layers[1].shape
       if shape1[0] is None:
-        self._shape = (parent_shape[1],)
+        self._shape = (shape2[0],)
       else:
-        self._shape = (parent_shape[0],)
+        self._shape = (shape1[0],)
     except:
       pass
 
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
     inputs = self._get_input_tensors(in_layers, True)
     guess, label = inputs[0], inputs[1]
-    out_tensor = tf.reduce_mean(
-        tf.square(guess - label), axis=list(range(1, len(label._shape))))
+    l2 = tf.square(guess - label)
+    if len(inputs) > 2:
+      l2 *= inputs[2]
+    out_tensor = tf.reduce_mean(l2, axis=list(range(1, len(label._shape))))
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -1070,9 +1249,32 @@ class SoftMax(Layer):
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
     inputs = self._get_input_tensors(in_layers)
     if len(inputs) != 1:
-      raise ValueError("Must only Softmax single parent")
+      raise ValueError("Softmax must have a single input layer.")
     parent = inputs[0]
     out_tensor = tf.contrib.layers.softmax(parent)
+    if set_tensors:
+      self.out_tensor = out_tensor
+    return out_tensor
+
+
+class Sigmoid(Layer):
+  """ Compute the sigmoid of input: f(x) = sigmoid(x)
+  Only one input is allowed, output will have the same shape as input
+  """
+
+  def __init__(self, in_layers=None, **kwargs):
+    super(Sigmoid, self).__init__(in_layers, **kwargs)
+    try:
+      self._shape = tuple(self.in_layers[0].shape)
+    except:
+      pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    inputs = self._get_input_tensors(in_layers)
+    if len(inputs) != 1:
+      raise ValueError("Sigmoid must have a single input layer.")
+    parent = inputs[0]
+    out_tensor = tf.nn.sigmoid(parent)
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -1397,9 +1599,8 @@ class SparseSoftMaxCrossEntropy(Layer):
     if len(inputs) != 2:
       raise ValueError()
     labels, logits = inputs[0], inputs[1]
-    self.out_tensor = tf.nn.sparse_softmax_cross_entropy_with_logits(
+    out_tensor = tf.nn.sparse_softmax_cross_entropy_with_logits(
         logits=logits, labels=labels)
-    out_tensor = tf.reshape(self.out_tensor, [-1, 1])
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -1410,7 +1611,7 @@ class SoftMaxCrossEntropy(Layer):
   def __init__(self, in_layers=None, **kwargs):
     super(SoftMaxCrossEntropy, self).__init__(in_layers, **kwargs)
     try:
-      self._shape = (self.in_layers[1].shape[0], 1)
+      self._shape = self.in_layers[1].shape[:-1]
     except:
       pass
 
@@ -1419,9 +1620,35 @@ class SoftMaxCrossEntropy(Layer):
     if len(inputs) != 2:
       raise ValueError()
     labels, logits = inputs[0], inputs[1]
-    self.out_tensor = tf.nn.softmax_cross_entropy_with_logits(
+    out_tensor = tf.nn.softmax_cross_entropy_with_logits_v2(
         logits=logits, labels=labels)
-    out_tensor = tf.reshape(self.out_tensor, [-1, 1])
+    if set_tensors:
+      self.out_tensor = out_tensor
+    return out_tensor
+
+
+class SigmoidCrossEntropy(Layer):
+  """ Compute the sigmoid cross entropy of inputs: [labels, logits]
+  `labels` hold the binary labels(with no axis of n_classes),
+  `logits` hold the log probabilities for positive class(label=1),
+  `labels` and `logits` should have same shape and type.
+  Output will have the same shape as `logits`
+  """
+
+  def __init__(self, in_layers=None, **kwargs):
+    super(SigmoidCrossEntropy, self).__init__(in_layers, **kwargs)
+    try:
+      self._shape = self.in_layers[1].shape
+    except:
+      pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    inputs = self._get_input_tensors(in_layers, True)
+    if len(inputs) != 2:
+      raise ValueError()
+    labels, logits = inputs[0], inputs[1]
+    out_tensor = tf.nn.sigmoid_cross_entropy_with_logits(
+        logits=logits, labels=labels)
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -1453,6 +1680,37 @@ class ReduceMean(Layer):
       self.out_tensor = inputs[0]
 
     out_tensor = tf.reduce_mean(self.out_tensor, axis=self.axis)
+    if set_tensors:
+      self.out_tensor = out_tensor
+    return out_tensor
+
+
+class ReduceMax(Layer):
+
+  def __init__(self, in_layers=None, axis=None, **kwargs):
+    if axis is not None and not isinstance(axis, Sequence):
+      axis = [axis]
+    self.axis = axis
+    super(ReduceMax, self).__init__(in_layers, **kwargs)
+    if axis is None:
+      self._shape = tuple()
+    else:
+      try:
+        parent_shape = self.in_layers[0].shape
+        self._shape = [
+            parent_shape[i] for i in range(len(parent_shape)) if i not in axis
+        ]
+      except:
+        pass
+
+  def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
+    inputs = self._get_input_tensors(in_layers)
+    if len(inputs) > 1:
+      self.out_tensor = tf.stack(inputs)
+    else:
+      self.out_tensor = inputs[0]
+
+    out_tensor = tf.reduce_max(self.out_tensor, axis=self.axis)
     if set_tensors:
       self.out_tensor = out_tensor
     return out_tensor
@@ -1960,8 +2218,8 @@ class MaxPool1D(Layer):
     super(MaxPool1D, self).__init__(**kwargs)
     try:
       parent_shape = self.in_layers[0].shape
-      self._shape = tuple(None if p is None else p // s
-                          for p, s in zip(parent_shape, strides))
+      self._shape = tuple(
+          None if p is None else p // s for p, s in zip(parent_shape, strides))
     except:
       pass
 
@@ -1992,8 +2250,8 @@ class MaxPool2D(Layer):
     super(MaxPool2D, self).__init__(**kwargs)
     try:
       parent_shape = self.in_layers[0].shape
-      self._shape = tuple(None if p is None else p // s
-                          for p, s in zip(parent_shape, strides))
+      self._shape = tuple(
+          None if p is None else p // s for p, s in zip(parent_shape, strides))
     except:
       pass
 
@@ -2039,8 +2297,8 @@ class MaxPool3D(Layer):
     super(MaxPool3D, self).__init__(**kwargs)
     try:
       parent_shape = self.in_layers[0].shape
-      self._shape = tuple(None if p is None else p // s
-                          for p, s in zip(parent_shape, strides))
+      self._shape = tuple(
+          None if p is None else p // s for p, s in zip(parent_shape, strides))
     except:
       pass
 
@@ -2073,8 +2331,7 @@ class InputFifoQueue(Layer):
       in_layers = self.in_layers
     in_layers = convert_to_layers(in_layers)
     self.dtypes = [x.out_tensor.dtype for x in in_layers]
-    self.queue = tf.FIFOQueue(
-        self.capacity, self.dtypes, shapes=self.shapes, names=self.names)
+    self.queue = tf.FIFOQueue(self.capacity, self.dtypes, names=self.names)
     feed_dict = {x.name: x.out_tensor for x in in_layers}
     self.out_tensor = self.queue.enqueue(feed_dict)
     self.close_op = self.queue.close()
@@ -2261,43 +2518,44 @@ class GraphGather(Layer):
     super(GraphGather, self).__init__(**kwargs)
 
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
-    inputs = self._get_input_tensors(in_layers)
+    with tf.device('/cpu'):
+      inputs = self._get_input_tensors(in_layers)
 
-    # x = [atom_features, deg_slice, membership, deg_adj_list placeholders...]
-    atom_features = inputs[0]
+      # x = [atom_features, deg_slice, membership, deg_adj_list placeholders...]
+      atom_features = inputs[0]
 
-    # Extract graph topology
-    membership = inputs[2]
+      # Extract graph topology
+      membership = inputs[2]
 
-    # Perform the mol gather
+      # Perform the mol gather
 
-    assert self.batch_size > 1, "graph_gather requires batches larger than 1"
+      assert self.batch_size > 1, "graph_gather requires batches larger than 1"
 
-    # Obtain the partitions for each of the molecules
-    activated_par = tf.dynamic_partition(atom_features, membership,
-                                         self.batch_size)
+      # Obtain the partitions for each of the molecules
+      activated_par = tf.dynamic_partition(atom_features, membership,
+                                           self.batch_size)
 
-    # Sum over atoms for each molecule
-    sparse_reps = [
-        tf.reduce_mean(activated, 0, keep_dims=True)
-        for activated in activated_par
-    ]
-    max_reps = [
-        tf.reduce_max(activated, 0, keep_dims=True)
-        for activated in activated_par
-    ]
+      # Sum over atoms for each molecule
+      sparse_reps = [
+          tf.reduce_mean(activated, 0, keepdims=True)
+          for activated in activated_par
+      ]
+      max_reps = [
+          tf.reduce_max(activated, 0, keepdims=True)
+          for activated in activated_par
+      ]
 
-    # Get the final sparse representations
-    sparse_reps = tf.concat(axis=0, values=sparse_reps)
-    max_reps = tf.concat(axis=0, values=max_reps)
-    mol_features = tf.concat(axis=1, values=[sparse_reps, max_reps])
+      # Get the final sparse representations
+      sparse_reps = tf.concat(axis=0, values=sparse_reps)
+      max_reps = tf.concat(axis=0, values=max_reps)
+      mol_features = tf.concat(axis=1, values=[sparse_reps, max_reps])
 
-    if self.activation_fn is not None:
-      mol_features = self.activation_fn(mol_features)
-    out_tensor = mol_features
-    if set_tensors:
-      self.out_tensor = out_tensor
-    return out_tensor
+      if self.activation_fn is not None:
+        mol_features = self.activation_fn(mol_features)
+      out_tensor = mol_features
+      if set_tensors:
+        self.out_tensor = out_tensor
+      return out_tensor
 
 
 class LSTMStep(Layer):
@@ -2744,6 +3002,14 @@ class BatchNormalization(Layer):
       self.out_tensor = out_tensor
     return out_tensor
 
+  def none_tensors(self):
+    gamma, beta, out_tensor = self.gamma, self.beta, self.out_tensor
+    self.gamma, self.beta, self.out_tensor = None, None, None
+    return gamma, beta, out_tensor
+
+  def set_tensors(self, tensor):
+    self.gamma, self.beta, self.out_tensor = tensor
+
 
 class WeightedError(Layer):
 
@@ -2752,7 +3018,7 @@ class WeightedError(Layer):
     self._shape = tuple()
 
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
-    inputs = self._get_input_tensors(in_layers, True)
+    inputs = self._get_input_tensors(in_layers)
     entropy, weights = inputs[0], inputs[1]
     out_tensor = tf.reduce_sum(entropy * weights)
     if set_tensors:
@@ -2806,15 +3072,13 @@ class VinaFreeEnergy(Layer):
 
   def hydrophobic(self, d):
     """Computes Autodock Vina's hydrophobic interaction term."""
-    out_tensor = tf.where(d < 0.5,
-                          tf.ones_like(d),
+    out_tensor = tf.where(d < 0.5, tf.ones_like(d),
                           tf.where(d < 1.5, 1.5 - d, tf.zeros_like(d)))
     return out_tensor
 
   def hydrogen_bond(self, d):
     """Computes Autodock Vina's hydrogen bond interaction term."""
-    out_tensor = tf.where(d < -0.7,
-                          tf.ones_like(d),
+    out_tensor = tf.where(d < -0.7, tf.ones_like(d),
                           tf.where(d < 0, (1.0 / 0.7) * (0 - d),
                                    tf.zeros_like(d)))
     return out_tensor
@@ -3191,8 +3455,8 @@ class NeighborList(Layer):
     mesh_args = [tf.range(start, stop, nbr_cutoff) for _ in range(self.ndim)]
     return tf.to_float(
         tf.reshape(
-            tf.transpose(tf.stack(tf.meshgrid(*mesh_args))), (self.n_cells,
-                                                              self.ndim)))
+            tf.transpose(tf.stack(tf.meshgrid(*mesh_args))),
+            (self.n_cells, self.ndim)))
 
 
 class Dropout(Layer):
@@ -3479,8 +3743,8 @@ class AtomicConvolution(Layer):
     example_tensors = tf.unstack(X, axis=0)
     example_nbrs = tf.unstack(nbr_indices, axis=0)
     all_nbr_coords = []
-    for example, (example_tensor,
-                  example_nbr) in enumerate(zip(example_tensors, example_nbrs)):
+    for example, (example_tensor, example_nbr) in enumerate(
+        zip(example_tensors, example_nbrs)):
       nbr_coords = tf.gather(example_tensor, example_nbr)
       all_nbr_coords.append(nbr_coords)
     neighbors = tf.stack(all_nbr_coords)
@@ -3824,8 +4088,8 @@ class ANIFeat(Layer):
     f_R_ik = tf.stack([d_cutoff] * max_atoms, axis=2)
 
     # Define angle theta = arccos(R_ij(Vector) dot R_ik(Vector)/R_ij(distance)/R_ik(distance))
-    vector_mul = tf.reduce_sum(tf.stack([vector_distances]*max_atoms, axis=3) * \
-        tf.stack([vector_distances]*max_atoms, axis=2), axis=4)
+    vector_mul = tf.reduce_sum(tf.stack([vector_distances] * max_atoms, axis=3) * \
+                               tf.stack([vector_distances] * max_atoms, axis=2), axis=4)
     vector_mul = vector_mul * tf.sign(f_R_ij) * tf.sign(f_R_ik)
     theta = tf.acos(tf.div(vector_mul, R_ij * R_ik + 1e-5))
 
@@ -3835,8 +4099,8 @@ class ANIFeat(Layer):
     f_R_ik = tf.stack([f_R_ik] * length, axis=4)
     theta = tf.stack([theta] * length, axis=4)
 
-    out_tensor = tf.pow((1. + tf.cos(theta - thetas))/2., zeta) * \
-        tf.exp(-ita * tf.square((R_ij + R_ik)/2. - Rs)) * f_R_ij * f_R_ik * 2
+    out_tensor = tf.pow((1. + tf.cos(theta - thetas)) / 2., zeta) * \
+                 tf.exp(-ita * tf.square((R_ij + R_ik) / 2. - Rs)) * f_R_ij * f_R_ik * 2
 
     if self.atomic_number_differentiated:
       out_tensors = []
@@ -4046,13 +4310,13 @@ class GraphCNN(Layer):
     no_features = V.get_shape()[2].value
     W = tf.get_variable(
         '%s_weights' % self.name, [no_features * no_A, self.num_filters],
-        initializer=tf.truncated_normal_initializer(stddev=math.sqrt(
-            1.0 / (no_features * (no_A + 1) * 1.0))),
+        initializer=tf.truncated_normal_initializer(
+            stddev=math.sqrt(1.0 / (no_features * (no_A + 1) * 1.0))),
         dtype=tf.float32)
     W_I = tf.get_variable(
         '%s_weights_I' % self.name, [no_features, self.num_filters],
-        initializer=tf.truncated_normal_initializer(stddev=math.sqrt(
-            1.0 / (no_features * (no_A + 1) * 1.0))),
+        initializer=tf.truncated_normal_initializer(
+            stddev=math.sqrt(1.0 / (no_features * (no_A + 1) * 1.0))),
         dtype=tf.float32)
 
     b = tf.get_variable(

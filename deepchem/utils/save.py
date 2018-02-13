@@ -8,11 +8,14 @@ from __future__ import unicode_literals
 # TODO(rbharath): Use standard joblib once old-data has been regenerated.
 import joblib
 from sklearn.externals import joblib as old_joblib
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder
 import gzip
+import json
 import pickle
 import pandas as pd
 import numpy as np
 import os
+import sys
 import deepchem
 from rdkit import Chem
 
@@ -103,6 +106,101 @@ def load_csv_files(filenames, shard_size=None, verbose=True):
         yield df
 
 
+def seq_one_hot_encode(sequences):
+  """One hot encodes list of genomic sequences.
+
+  Sequences encoded have shape (N_sequences, 4, sequence_length, 1).
+  Here 4 is for the 4 basepairs (ACGT) present in genomic sequences.
+  These sequences will be processed as images with one color channel.
+
+  Parameters
+  ----------
+  sequences: np.ndarray 
+    Array of genetic sequences 
+
+  Raises
+  ------
+  ValueError:
+    If sequences are of different lengths.
+
+  Returns
+  -------
+  np.ndarray: Shape (N_sequences, 4, sequence_length, 1).
+  """
+  sequence_length = len(sequences[0])
+  # depends on Python version
+  integer_type = np.int32
+  # The label encoder is given characters for ACGTN
+  label_encoder = LabelEncoder().fit(np.array(('ACGTN',)).view(integer_type))
+  # These are transformed in 0, 1, 2, 3, 4 in input sequence
+  integer_array = []
+  # TODO(rbharath): Unlike the DRAGONN implementation from which this
+  # was ported, I couldn't transform the "ACGT..." strings into
+  # integers all at once. Had to do one at a time. Might be worth
+  # figuring out what's going on under the hood.
+  for sequence in sequences:
+    if len(sequence) != sequence_length:
+      raise ValueError("All sequences must be of same length")
+    integer_seq = label_encoder.transform(
+        np.array((sequence,)).view(integer_type))
+    integer_array.append(integer_seq)
+  integer_array = np.concatenate(integer_array)
+  integer_array = integer_array.reshape(len(sequences), sequence_length)
+  one_hot_encoding = OneHotEncoder(
+      sparse=False, n_values=5, dtype=integer_type).fit_transform(integer_array)
+
+  return one_hot_encoding.reshape(len(sequences), sequence_length, 5,
+                                  1).swapaxes(1, 2)[:, [0, 1, 2, 4], :, :]
+
+
+def encode_fasta_sequence(fname):
+  """
+  Loads fasta file and returns an array of one-hot sequences.
+
+  Parameters
+  ----------
+  fname: str
+    Filename of fasta file.
+  """
+  name, seq_chars = None, []
+  sequences = []
+  with open(fname) as fp:
+    for line in fp:
+      line = line.rstrip()
+      if line.startswith(">"):
+        if name:
+          sequences.append(''.join(seq_chars).upper())
+        name, seq_chars = line, []
+      else:
+        seq_chars.append(line)
+  if name is not None:
+    sequences.append(''.join(seq_chars).upper())
+
+  return seq_one_hot_encode(np.array(sequences))
+
+
+def save_metadata(tasks, metadata_df, data_dir):
+  """
+  Saves the metadata for a DiskDataset
+  Parameters
+  ----------
+  tasks: list of str
+    Tasks of DiskDataset
+  metadata_df: pd.DataFrame
+  data_dir: str
+    Directory to store metadata
+  Returns
+  -------
+  """
+  if isinstance(tasks, np.ndarray):
+    tasks = tasks.tolist()
+  metadata_filename = os.path.join(data_dir, "metadata.csv.gzip")
+  tasks_filename = os.path.join(data_dir, "tasks.json")
+  with open(tasks_filename, 'w') as fout:
+    json.dump(tasks, fout)
+  metadata_df.to_csv(metadata_filename, index=False, compression='gzip')
+
+
 def load_from_disk(filename):
   """Load a dataset from file."""
   name = filename
@@ -142,7 +240,7 @@ def load_sharded_csv(filenames):
     else:
       raise ValueError("Unrecognized filetype for %s" % filename)
 
-  #combine dataframes
+  # combine dataframes
   combined_df = dataframes[0]
   for i in range(0, len(dataframes) - 1):
     combined_df = combined_df.append(dataframes[i + 1])
@@ -162,23 +260,36 @@ def load_pickle_from_disk(filename):
 
 
 def load_dataset_from_disk(save_dir):
+  """
+  Parameters
+  ----------
+  save_dir: str
+
+  Returns
+  -------
+  loaded: bool
+    Whether the load succeeded
+  all_dataset: (dc.data.Dataset, dc.data.Dataset, dc.data.Dataset)
+    The train, valid, test datasets
+  transformers: list of dc.trans.Transformer
+    The transformers used for this dataset
+
+  """
+
   train_dir = os.path.join(save_dir, "train_dir")
   valid_dir = os.path.join(save_dir, "valid_dir")
   test_dir = os.path.join(save_dir, "test_dir")
-  if os.path.exists(train_dir) and os.path.exists(valid_dir) and os.path.exists(
-      test_dir):
-    loaded = True
-    train = deepchem.data.DiskDataset(train_dir)
-    valid = deepchem.data.DiskDataset(valid_dir)
-    test = deepchem.data.DiskDataset(test_dir)
-    all_dataset = (train, valid, test)
-    with open(os.path.join(save_dir, "transformers.pkl"), 'rb') as f:
-      transformers = pickle.load(f)
-  else:
-    loaded = False
-    all_dataset = None
-    transformers = []
-  return loaded, all_dataset, transformers
+  if not os.path.exists(train_dir) or not os.path.exists(
+      valid_dir) or not os.path.exists(test_dir):
+    return False, None, list()
+  loaded = True
+  train = deepchem.data.DiskDataset(train_dir)
+  valid = deepchem.data.DiskDataset(valid_dir)
+  test = deepchem.data.DiskDataset(test_dir)
+  all_dataset = (train, valid, test)
+  with open(os.path.join(save_dir, "transformers.pkl"), 'rb') as f:
+    transformers = pickle.load(f)
+    return loaded, all_dataset, transformers
 
 
 def save_dataset_to_disk(save_dir, train, valid, test, transformers):
