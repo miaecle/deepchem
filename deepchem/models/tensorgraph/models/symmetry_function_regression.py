@@ -15,7 +15,7 @@ import tensorflow as tf
 
 import deepchem as dc
 
-from deepchem.models.tensorgraph.layers import Dense, Concat, WeightedError, Stack, Layer, ANIFeat
+from deepchem.models.tensorgraph.layers import Dense, Concat, WeightedError, Stack, Layer, ANIFeat, Exp
 from deepchem.models.tensorgraph.layers import L2Loss, Label, Weights, Feature
 from deepchem.models.tensorgraph.tensor_graph import TensorGraph
 from deepchem.models.tensorgraph.graph_layers import DTNNEmbedding
@@ -332,7 +332,8 @@ class ANIRegression(TensorGraph):
 
     all_cost = Stack(in_layers=costs, axis=1)
     self.weights = Weights(shape=(None, self.n_tasks))
-    loss = WeightedError(in_layers=[all_cost, self.weights])
+    weighted_loss = WeightedError(in_layers=[all_cost, self.weights])
+    loss = 0.5 * Exp(in_layers=[2 * weighted_loss])
     self.set_loss(loss)
 
   def default_generator(self,
