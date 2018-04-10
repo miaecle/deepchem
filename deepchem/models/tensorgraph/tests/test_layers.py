@@ -5,7 +5,7 @@ from tensorflow.python.framework import test_util
 
 from deepchem.feat.graph_features import ConvMolFeaturizer
 from deepchem.feat.mol_graphs import ConvMol
-from deepchem.models.tensorgraph.layers import Add, MaxPool2D, MaxPool3D, GraphCNN, GraphEmbedPoolLayer
+from deepchem.models.tensorgraph.layers import Add, MaxPool2D, MaxPool3D, GraphCNN, GraphEmbedPoolLayer, Cast
 from deepchem.models.tensorgraph.layers import AlphaShareLayer
 from deepchem.models.tensorgraph.layers import AttnLSTMEmbedding
 from deepchem.models.tensorgraph.layers import BatchNorm
@@ -25,22 +25,28 @@ from deepchem.models.tensorgraph.layers import GRU
 from deepchem.models.tensorgraph.layers import Gather
 from deepchem.models.tensorgraph.layers import GraphConv
 from deepchem.models.tensorgraph.layers import GraphGather
+from deepchem.models.tensorgraph.layers import HingeLoss
 from deepchem.models.tensorgraph.layers import Input
 from deepchem.models.tensorgraph.layers import InputFifoQueue
 from deepchem.models.tensorgraph.layers import InteratomicL2Distances
 from deepchem.models.tensorgraph.layers import IterRefLSTMEmbedding
 from deepchem.models.tensorgraph.layers import L2Loss
+from deepchem.models.tensorgraph.layers import LSTM
 from deepchem.models.tensorgraph.layers import LSTMStep
 from deepchem.models.tensorgraph.layers import Log
 from deepchem.models.tensorgraph.layers import Multiply
 from deepchem.models.tensorgraph.layers import ReduceMean
 from deepchem.models.tensorgraph.layers import ReduceSquareDifference
 from deepchem.models.tensorgraph.layers import ReduceSum
+from deepchem.models.tensorgraph.layers import ReLU
 from deepchem.models.tensorgraph.layers import Repeat
 from deepchem.models.tensorgraph.layers import Reshape
 from deepchem.models.tensorgraph.layers import SluiceLoss
+from deepchem.models.tensorgraph.layers import Sigmoid
+from deepchem.models.tensorgraph.layers import SigmoidCrossEntropy
 from deepchem.models.tensorgraph.layers import SoftMax
 from deepchem.models.tensorgraph.layers import SoftMaxCrossEntropy
+from deepchem.models.tensorgraph.layers import SparseSoftMaxCrossEntropy
 from deepchem.models.tensorgraph.layers import StopGradient
 from deepchem.models.tensorgraph.layers import TensorWrapper
 from deepchem.models.tensorgraph.layers import TimeSeriesDense
@@ -50,6 +56,9 @@ from deepchem.models.tensorgraph.layers import Variable
 from deepchem.models.tensorgraph.layers import VinaFreeEnergy
 from deepchem.models.tensorgraph.layers import WeightedError
 from deepchem.models.tensorgraph.layers import WeightedLinearCombo
+from deepchem.models.tensorgraph.IRV import IRVLayer
+from deepchem.models.tensorgraph.IRV import IRVRegularize
+from deepchem.models.tensorgraph.IRV import Slice
 
 
 class TestLayers(test_util.TensorFlowTestCase):
@@ -61,16 +70,18 @@ class TestLayers(test_util.TensorFlowTestCase):
     """Test that Conv1D can be invoked."""
     width = 5
     in_channels = 2
-    out_channels = 3
+    filters = 3
+    kernel_size = 2
     batch_size = 10
     in_tensor = np.random.rand(batch_size, width, in_channels)
     with self.test_session() as sess:
       in_tensor = tf.convert_to_tensor(in_tensor, dtype=tf.float32)
-      out_tensor = Conv1D(width, out_channels)(in_tensor)
+      out_tensor = Conv1D(filters, kernel_size)(in_tensor)
       sess.run(tf.global_variables_initializer())
       out_tensor = out_tensor.eval()
 
-      assert out_tensor.shape == (batch_size, width, out_channels)
+      self.assertEqual(out_tensor.shape[0], batch_size)
+      self.assertEqual(out_tensor.shape[2], filters)
 
   def test_dense(self):
     """Test that Dense can be invoked."""
@@ -172,6 +183,21 @@ class TestLayers(test_util.TensorFlowTestCase):
       out_tensor = out_tensor.eval()
       assert out_tensor.shape == (batch_size, n_steps, n_hidden)
 
+  def test_lstm(self):
+    """Test that LSTM can be invoked."""
+    batch_size = 10
+    n_hidden = 7
+    in_channels = 4
+    n_repeat = 2
+    n_steps = 6
+    in_tensor = np.random.rand(batch_size, n_steps, in_channels)
+    with self.test_session() as sess:
+      in_tensor = tf.convert_to_tensor(in_tensor, dtype=tf.float32)
+      out_tensor = LSTM(n_hidden, batch_size)(in_tensor)
+      sess.run(tf.global_variables_initializer())
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size, n_steps, n_hidden)
+
   def test_time_series_dense(self):
     """Test that TimeSeriesDense can be invoked."""
     batch_size = 10
@@ -204,6 +230,28 @@ class TestLayers(test_util.TensorFlowTestCase):
       out_tensor = L2Loss()(guess_tensor, label_tensor)
       out_tensor = out_tensor.eval()
       assert out_tensor.shape == (batch_size,)
+
+  def test_relu(self):
+    """Test that Sigmoid can be invoked."""
+    batch_size = 10
+    n_features = 5
+    in_tensor = np.random.rand(batch_size, n_features)
+    with self.test_session() as sess:
+      in_tensor = tf.convert_to_tensor(in_tensor, dtype=tf.float32)
+      out_tensor = ReLU()(in_tensor)
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size, n_features)
+
+  def test_sigmoid(self):
+    """Test that Sigmoid can be invoked."""
+    batch_size = 10
+    n_features = 5
+    in_tensor = np.random.rand(batch_size, n_features)
+    with self.test_session() as sess:
+      in_tensor = tf.convert_to_tensor(in_tensor, dtype=tf.float32)
+      out_tensor = Sigmoid()(in_tensor)
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size, n_features)
 
   def test_softmax(self):
     """Test that Softmax can be invoked."""
@@ -260,8 +308,9 @@ class TestLayers(test_util.TensorFlowTestCase):
     value2 = np.random.uniform(size=(2, 3)).astype(np.float32)
     value3 = np.random.uniform(size=(2, 3)).astype(np.float32)
     with self.test_session() as sess:
-      out_tensor = Add(weights=[1, 2, 1])(
-          tf.constant(value1), tf.constant(value2), tf.constant(value3))
+      out_tensor = Add(weights=[1, 2, 1])(tf.constant(value1),
+                                          tf.constant(value2),
+                                          tf.constant(value3))
       assert np.array_equal(value1 + 2 * value2 + value3, out_tensor.eval())
 
   def test_multiply(self):
@@ -280,6 +329,7 @@ class TestLayers(test_util.TensorFlowTestCase):
     with self.test_session() as sess:
       result = Log()(value).eval()
       assert np.array_equal(np.log(value), result)
+      assert np.all(np.isclose(np.log(value), result, atol=0.001))
 
   def test_exp(self):
     """Test that Exp can be invoked."""
@@ -307,6 +357,19 @@ class TestLayers(test_util.TensorFlowTestCase):
       dists = dist_tensor.eval()
       assert dists.shape == (N_atoms, M_nbrs)
 
+  def test_sigmoid_cross_entropy(self):
+    """Test that SigmoidCrossEntropy can be invoked."""
+    batch_size = 10
+    n_features = 5
+    logit_tensor = np.random.rand(batch_size, n_features)
+    label_tensor = np.random.randint(0, 2, (batch_size, n_features))
+    with self.test_session() as sess:
+      logit_tensor = tf.convert_to_tensor(logit_tensor, dtype=tf.float32)
+      label_tensor = tf.convert_to_tensor(label_tensor, dtype=tf.float32)
+      out_tensor = SigmoidCrossEntropy()(label_tensor, logit_tensor)
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size, n_features)
+
   def test_softmax_cross_entropy(self):
     """Test that SoftMaxCrossEntropy can be invoked."""
     batch_size = 10
@@ -318,7 +381,19 @@ class TestLayers(test_util.TensorFlowTestCase):
       label_tensor = tf.convert_to_tensor(label_tensor, dtype=tf.float32)
       out_tensor = SoftMaxCrossEntropy()(logit_tensor, label_tensor)
       out_tensor = out_tensor.eval()
-      assert out_tensor.shape == (batch_size, 1)
+      assert out_tensor.shape == (batch_size,)
+
+  def test_sparse_softmax_cross_entropy(self):
+    batch_size = 10
+    n_features = 5
+    logit_tensor = np.random.rand(batch_size, n_features)
+    label_tensor = np.random.rand(batch_size)
+    with self.test_session() as sess:
+      logit_tensor = tf.convert_to_tensor(logit_tensor, dtype=tf.float32)
+      label_tensor = tf.convert_to_tensor(label_tensor, dtype=tf.int32)
+      out_tensor = SparseSoftMaxCrossEntropy()(label_tensor, logit_tensor)
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size,)
 
   def test_reduce_mean(self):
     """Test that ReduceMean can be invoked."""
@@ -692,6 +767,14 @@ class TestLayers(test_util.TensorFlowTestCase):
       loss = np.mean(diff**2)
       assert (loss - result) / loss < 1e-6
 
+  def test_cast(self):
+    """Test that layers can automatically reshape inconsistent inputs."""
+    value1 = np.random.uniform(size=(2, 1)).astype(np.float32)
+    with self.test_session() as sess:
+      out_tensor = Cast(dtype=tf.int32)(tf.constant(value1))
+      result = out_tensor.eval()
+      assert result.dtype == np.int32
+
   def test_squeeze_inputs(self):
     """Test that layers can automatically reshape inconsistent inputs."""
     value1 = np.random.uniform(size=(2, 1)).astype(np.float32)
@@ -777,3 +860,45 @@ class TestLayers(test_util.TensorFlowTestCase):
       vertex_props, adjs = vertex_props.eval(), adjs.eval()
       assert vertex_props.shape == (10, 6, 50)
       assert adjs.shape == (10, 6, 5, 6)
+
+  def test_slice(self):
+    """Test that Slice can be invoked."""
+    batch_size = 10
+    n_features = 5
+    test_tensor_input = np.random.rand(batch_size, n_features)
+    with self.test_session() as sess:
+      test_tensor = tf.convert_to_tensor(test_tensor_input, dtype=tf.float32)
+      out_tensor = Slice(1)(test_tensor)
+      out_tensor = out_tensor.eval()
+      assert np.allclose(out_tensor, test_tensor_input[:, 1:2])
+
+  def test_IRV(self):
+    """Test that IRVLayer and IRVRegularize can be invoked."""
+    batch_size = 10
+    n_tasks = 5
+    K = 10
+    n_features = 2 * K * n_tasks
+    test_tensor_input = np.random.rand(batch_size, n_features)
+    with self.test_session() as sess:
+      test_tensor = tf.convert_to_tensor(test_tensor_input, dtype=tf.float32)
+      irv_layer = IRVLayer(n_tasks, K)
+      irv_layer.create_tensor(in_layers=[test_tensor])
+      out_tensor = irv_layer.out_tensor
+      sess.run(tf.global_variables_initializer())
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (batch_size, n_tasks)
+      irv_reg = IRVRegularize(irv_layer, 1.)()
+      assert irv_reg.eval() >= 0
+
+  def test_hingeloss(self):
+
+    labels = 1
+    logits = 1
+    logits_tensor = np.random.rand(logits)
+    labels_tensor = np.random.rand(labels)
+    with self.test_session() as sess:
+      logits_tensor = tf.convert_to_tensor(logits_tensor, dtype=tf.float32)
+      labels_tensor = tf.convert_to_tensor(labels_tensor, dtype=tf.float32)
+      out_tensor = HingeLoss()(labels_tensor, logits_tensor)
+      out_tensor = out_tensor.eval()
+      assert out_tensor.shape == (labels,)

@@ -1,7 +1,6 @@
 """
 Tests that deepchem models make deterministic predictions. 
 """
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
@@ -34,6 +33,7 @@ class TestPredict(test_util.TensorFlowTestCase):
     super(TestPredict, self).setUp()
     self.current_dir = os.path.dirname(os.path.abspath(__file__))
 
+  '''
   def test_tf_progressive_regression_predict(self):
     """Test tf progressive multitask makes deterministic predictions."""
     np.random.seed(123)
@@ -71,3 +71,4 @@ class TestPredict(test_util.TensorFlowTestCase):
     y_pred_first = model.predict(dataset)
     y_pred_second = model.predict(dataset)
     np.testing.assert_allclose(y_pred_first, y_pred_second)
+  '''

@@ -9,8 +9,8 @@ import copy
 
 from deepchem.metrics import to_one_hot, from_one_hot
 from deepchem.models.tensorgraph.layers import Dense, Concat, SoftMax, \
-  SoftMaxCrossEntropy, BatchNorm, WeightedError, Dropout, BatchNormalization, \
-  Conv1D, MaxPool1D, Squeeze, Stack, Highway
+  SoftMaxCrossEntropy, BatchNorm, WeightedError, Dropout, \
+  Conv1D, ReduceMax, Squeeze, Stack, Highway
 from deepchem.models.tensorgraph.graph_layers import DTNNEmbedding
 
 from deepchem.models.tensorgraph.layers import L2Loss, Label, Weights, Feature
@@ -55,7 +55,7 @@ default_dict = {
 }
 
 
-class TextCNNTensorGraph(TensorGraph):
+class TextCNNModel(TensorGraph):
   """ A Convolutional neural network on smiles strings
   Reimplementation of the discriminator module in ORGAN: https://arxiv.org/abs/1705.10843
   Originated from: http://emnlp2014.org/papers/pdf/EMNLP2014181.pdf
@@ -69,13 +69,13 @@ class TextCNNTensorGraph(TensorGraph):
   into characters and transformed to one-hot vectors in a similar way. The model can
   be used for general molecular-level classification or regression tasks. It is also
   used in the ORGAN model as discriminator.
-  
+
   Training of the model only requires SMILES strings input, all featurized datasets
-  that include SMILES in the `ids` attribute are accepted. PDBbind, QM7 and QM7b 
+  that include SMILES in the `ids` attribute are accepted. PDBbind, QM7 and QM7b
   are not supported. To use the model, `build_char_dict` should be called first
   before defining the model to build character dict of input dataset, example can
   be found in examples/delaney/delaney_textcnn.py
-  
+
   """
 
   def __init__(
@@ -84,7 +84,7 @@ class TextCNNTensorGraph(TensorGraph):
       char_dict,
       seq_length,
       n_embedding=75,
-      filter_sizes=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20],
+      kernel_sizes=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 15, 20],
       num_filters=[100, 200, 200, 200, 200, 100, 100, 100, 100, 100, 160, 160],
       dropout=0.25,
       mode="classification",
@@ -104,6 +104,8 @@ class TextCNNTensorGraph(TensorGraph):
       Properties of filters used in the conv net
     num_filters: list of int, optional
       Properties of filters used in the conv net
+    dropout: float, optional
+      Dropout rate
     mode: str
       Either "classification" or "regression" for type of model.
     """
@@ -111,11 +113,11 @@ class TextCNNTensorGraph(TensorGraph):
     self.char_dict = char_dict
     self.seq_length = seq_length
     self.n_embedding = n_embedding
-    self.filter_sizes = filter_sizes
+    self.kernel_sizes = kernel_sizes
     self.num_filters = num_filters
     self.dropout = dropout
     self.mode = mode
-    super(TextCNNTensorGraph, self).__init__(**kwargs)
+    super(TextCNNModel, self).__init__(**kwargs)
     self.build_graph()
 
   @staticmethod
@@ -164,25 +166,20 @@ class TextCNNTensorGraph(TensorGraph):
         in_layers=[self.smiles_seqs])
     self.pooled_outputs = []
     self.conv_layers = []
-    for filter_size, num_filter in zip(self.filter_sizes, self.num_filters):
+    for filter_size, num_filter in zip(self.kernel_sizes, self.num_filters):
       # Multiple convolutional layers with different filter widths
       self.conv_layers.append(
           Conv1D(
-              filter_size,
-              num_filter,
-              padding='VALID',
+              kernel_size=filter_size,
+              filters=num_filter,
+              padding='valid',
               in_layers=[self.Embedding]))
       # Max-over-time pooling
       self.pooled_outputs.append(
-          MaxPool1D(
-              window_shape=self.seq_length - filter_size + 1,
-              strides=1,
-              padding='VALID',
-              in_layers=[self.conv_layers[-1]]))
+          ReduceMax(axis=1, in_layers=[self.conv_layers[-1]]))
     # Concat features from all filters(one feature per filter)
-    concat_outputs = Concat(axis=2, in_layers=self.pooled_outputs)
-    outputs = Squeeze(squeeze_dims=1, in_layers=concat_outputs)
-    dropout = Dropout(dropout_prob=self.dropout, in_layers=[outputs])
+    concat_outputs = Concat(axis=1, in_layers=self.pooled_outputs)
+    dropout = Dropout(dropout_prob=self.dropout, in_layers=[concat_outputs])
     dense = Dense(
         out_channels=200, activation_fn=tf.nn.relu, in_layers=[dropout])
     # Highway layer from https://arxiv.org/pdf/1505.00387.pdf
@@ -211,7 +208,7 @@ class TextCNNTensorGraph(TensorGraph):
         cost = L2Loss(in_layers=[label, regression])
         costs.append(cost)
     if self.mode == "classification":
-      all_cost = Concat(in_layers=costs, axis=1)
+      all_cost = Stack(in_layers=costs, axis=1)
     elif self.mode == "regression":
       all_cost = Stack(in_layers=costs, axis=1)
     self.weights = Weights(shape=(None, self.n_tasks))
@@ -272,3 +269,31 @@ class TextCNNTensorGraph(TensorGraph):
       # Padding with '_'
       seq.append(self.char_dict['_'])
     return np.array(seq)
+
+  def predict_on_generator(self, generator, transformers=[], outputs=None):
+    out = super(TextCNNModel, self).predict_on_generator(
+        generator, transformers=[], outputs=outputs)
+    if outputs is None:
+      outputs = self.outputs
+    if len(outputs) > 1:
+      out = np.stack(out, axis=1)
+
+    out = undo_transforms(out, transformers)
+    return out
+
+
+#################### Deprecation warnings for renamed TensorGraph models ####################
+
+import warnings
+
+TENSORGRAPH_DEPRECATION = "{} is deprecated and has been renamed to {} and will be removed in DeepChem 3.0."
+
+
+class TextCNNTensorGraph(TextCNNModel):
+
+  def __init__(self, *args, **kwargs):
+    warnings.warn(
+        TENSORGRAPH_DEPRECATION.format("TextCNNTensorGraph", "TextCNNModel"),
+        FutureWarning)
+
+    super(TextCNNTensorGraph, self).__init__(*args, **kwargs)

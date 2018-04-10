@@ -5,16 +5,14 @@ Created on Thu Jul  6 20:43:23 2017
 
 @author: zqwu
 """
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
 import numpy as np
 import tensorflow as tf
-from deepchem.nn import activations
-from deepchem.nn import initializations
-from deepchem.nn import model_ops
-
+from deepchem.models.tensorgraph import activations
+from deepchem.models.tensorgraph import initializations
+from deepchem.models.tensorgraph import model_ops
 from deepchem.models.tensorgraph.layers import Layer
 from deepchem.models.tensorgraph.layers import convert_to_layers
 from deepchem.metrics import to_one_hot
@@ -401,7 +399,7 @@ class AtomicDifferentiatedDense(Layer):
                out_channels,
                atom_number_cases=[1, 6, 7, 8],
                init='glorot_uniform',
-               activation='relu',
+               activation='ani',
                **kwargs):
     self.init = init  # Set weight initialization
     self.activation = activation  # Get activations
@@ -411,10 +409,17 @@ class AtomicDifferentiatedDense(Layer):
 
     super(AtomicDifferentiatedDense, self).__init__(**kwargs)
 
+  @staticmethod
+  def ani_activate(X):
+    return tf.exp(-1*tf.pow(X, 2))
+
   def create_tensor(self, in_layers=None, set_tensors=True, **kwargs):
     """ Generate Radial Symmetry Function """
     init_fn = initializations.get(self.init)  # Set weight initialization
-    activation_fn = activations.get(self.activation)
+    if self.activation == 'ani':
+      activation_fn = self.ani_activate
+    else:
+      activation_fn = activations.get(self.activation)
     if in_layers is None:
       in_layers = self.in_layers
     in_layers = convert_to_layers(in_layers)
@@ -445,8 +450,8 @@ class AtomicDifferentiatedDense(Layer):
           self.b[i, :])
 
       mask = 1 - tf.to_float(tf.cast(atom_numbers - atom_case, tf.bool))
-      output = tf.reshape(output * tf.expand_dims(mask, 2), (-1, self.max_atoms,
-                                                             self.out_channels))
+      output = tf.reshape(output * tf.expand_dims(mask, 2),
+                          (-1, self.max_atoms, self.out_channels))
       outputs.append(output)
     self.out_tensor = tf.add_n(outputs)
 

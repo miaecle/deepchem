@@ -1,27 +1,28 @@
 """
 Tox21 dataset loader.
 """
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
 import os
+import logging
 import deepchem
+
+logger = logging.getLogger(__name__)
 
 
 def load_tox21(featurizer='ECFP', split='index', reload=True, K=4):
   """Load Tox21 datasets. Does not do train/test split"""
   # Featurize Tox21 dataset
-  data_dir = deepchem.utils.get_data_dir()
-  if reload:
-    save_dir = os.path.join(data_dir, "tox21/" + featurizer + "/" + split)
 
   tox21_tasks = [
       'NR-AR', 'NR-AR-LBD', 'NR-AhR', 'NR-Aromatase', 'NR-ER', 'NR-ER-LBD',
       'NR-PPAR-gamma', 'SR-ARE', 'SR-ATAD5', 'SR-HSE', 'SR-MMP', 'SR-p53'
   ]
 
+  data_dir = deepchem.utils.get_data_dir()
   if reload:
+    save_dir = os.path.join(data_dir, "tox21/" + featurizer + "/" + str(split))
     loaded, all_dataset, transformers = deepchem.utils.save.load_dataset_from_disk(
         save_dir)
     if loaded:
@@ -42,7 +43,8 @@ def load_tox21(featurizer='ECFP', split='index', reload=True, K=4):
   elif featurizer == 'Raw':
     featurizer = deepchem.feat.RawFeaturizer()
   elif featurizer == 'AdjacencyConv':
-    featurizer = dc.feat.AdjacencyFingerprint(max_n_atoms=150, max_valence=6)
+    featurizer = deepchem.feat.AdjacencyFingerprint(
+        max_n_atoms=150, max_valence=6)
 
   loader = deepchem.data.CSVLoader(
       tasks=tox21_tasks, smiles_field="smiles", featurizer=featurizer)
@@ -53,9 +55,12 @@ def load_tox21(featurizer='ECFP', split='index', reload=True, K=4):
       deepchem.trans.BalancingTransformer(transform_w=True, dataset=dataset)
   ]
 
-  print("About to transform data")
+  logger.info("About to transform data")
   for transformer in transformers:
     dataset = transformer.transform(dataset)
+
+  if split == None:
+    return tox21_tasks, (dataset, None, None), transformers
 
   splitters = {
       'index': deepchem.splits.IndexSplitter(),

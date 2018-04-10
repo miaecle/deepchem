@@ -1,7 +1,6 @@
 """
 Integration tests for hyperparam optimization.
 """
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
@@ -145,8 +144,8 @@ class TestHyperparamOpt(unittest.TestCase):
     params_dict = {"layer_sizes": [(10,), (100,)]}
 
     def model_builder(model_params, model_dir):
-      return dc.models.TensorflowMultiTaskClassifier(
-          len(tasks), n_features, model_dir, **model_params)
+      return dc.models.MultiTaskClassifier(
+          len(tasks), n_features, model_dir=model_dir, **model_params)
 
     optimizer = dc.hyper.HyperparamOpt(model_builder)
     best_model, best_hyperparams, all_results = optimizer.hyperparam_search(

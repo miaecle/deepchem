@@ -1,7 +1,6 @@
 """
 Test reload for trained models.
 """
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
@@ -50,41 +49,3 @@ class TestReload(unittest.TestCase):
     # Eval model on train
     scores = reloaded_model.evaluate(dataset, [classification_metric])
     assert scores[classification_metric.name] > .9
-
-  def test_tf_reload(self):
-    """Test that tensorflow models can overfit simple classification datasets."""
-    n_samples = 10
-    n_features = 3
-    n_tasks = 1
-    n_classes = 2
-
-    # Generate dummy dataset
-    np.random.seed(123)
-    ids = np.arange(n_samples)
-    X = np.random.rand(n_samples, n_features)
-    y = np.random.randint(n_classes, size=(n_samples, n_tasks))
-    w = np.ones((n_samples, n_tasks))
-
-    dataset = dc.data.NumpyDataset(X, y, w, ids)
-
-    classification_metric = dc.metrics.Metric(dc.metrics.accuracy_score)
-
-    model_dir = tempfile.mkdtemp()
-    model = dc.models.TensorflowMultiTaskClassifier(
-        n_tasks, n_features, model_dir, dropouts=[0.])
-
-    # Fit trained model
-    model.fit(dataset)
-    scores_preload = model.evaluate(dataset,
-                                    [classification_metric])['accuracy_score']
-    model.save()
-
-    # Load trained model
-    reloaded_model = dc.models.TensorflowMultiTaskClassifier(
-        n_tasks, n_features, model_dir, dropouts=[0.])
-    reloaded_model.reload()
-
-    # Eval model on train
-    scores_reload = reloaded_model.evaluate(
-        dataset, [classification_metric])['accuracy_score']
-    assert np.isclose(scores_preload, scores_reload, 0.01)

@@ -9,7 +9,7 @@ import os
 import shutil
 import numpy as np
 import deepchem as dc
-from hopv_datasets import load_hopv
+from deepchem.molnet import load_hopv
 
 # Only for debug!
 np.random.seed(123)
@@ -36,7 +36,6 @@ model = dc.models.ProgressiveMultitaskRegressor(
 
 # Fit trained model
 model.fit(train_dataset, nb_epoch=25)
-model.save()
 
 print("Evaluating model")
 train_scores = model.evaluate(train_dataset, metric, transformers)

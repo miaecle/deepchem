@@ -1,8 +1,7 @@
 """
-Tests for Pose Generation 
+Tests for Pose Generation
 """
 from __future__ import division
-from __future__ import print_function
 from __future__ import unicode_literals
 
 __author__ = "Bharath Ramsundar"
@@ -18,7 +17,7 @@ from nose.plugins.attrib import attr
 
 class TestPoseGeneration(unittest.TestCase):
   """
-  Does sanity checks on pose generation. 
+  Does sanity checks on pose generation.
   """
 
   def test_vina_initialization(self):
@@ -33,6 +32,7 @@ class TestPoseGeneration(unittest.TestCase):
       return
     vpg = dc.dock.VinaPoseGenerator(detect_pockets=True, exhaustiveness=1)
 
+  @attr("slow")
   def test_vina_poses(self):
     """Test that VinaPoseGenerator creates pose files."""
     current_dir = os.path.dirname(os.path.realpath(__file__))

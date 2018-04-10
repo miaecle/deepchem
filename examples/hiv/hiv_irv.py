@@ -7,7 +7,7 @@ from __future__ import unicode_literals
 
 import numpy as np
 import deepchem as dc
-from hiv_datasets import load_hiv
+from deepchem.molnet import load_hiv
 
 # Only for debug!
 np.random.seed(123)
@@ -29,7 +29,6 @@ model = dc.models.TensorflowMultiTaskIRVClassifier(
 
 # Fit trained model
 model.fit(train_dataset)
-model.save()
 
 print("Evaluating model")
 train_scores = model.evaluate(train_dataset, [metric], transformers)

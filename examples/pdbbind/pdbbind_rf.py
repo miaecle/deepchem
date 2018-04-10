@@ -7,22 +7,22 @@ from __future__ import unicode_literals
 
 __author__ = "Bharath Ramsundar"
 __copyright__ = "Copyright 2016, Stanford University"
-__license__ = "GPL"
+__license__ = "MIT"
 
 import os
 import deepchem as dc
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from pdbbind_datasets import load_pdbbind_grid
+from deepchem.molnet import load_pdbbind_grid
 
-# For stable runs 
+# For stable runs
 np.random.seed(123)
 
 split = "random"
 subset = "full"
 pdbbind_tasks, pdbbind_datasets, transformers = load_pdbbind_grid(
     split=split, subset=subset)
-train_dataset, valid_dataset, test_dataset = pdbbind_datasets 
+train_dataset, valid_dataset, test_dataset = pdbbind_datasets
 
 metric = dc.metrics.Metric(dc.metrics.pearson_r2_score)
 

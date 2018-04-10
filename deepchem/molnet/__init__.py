@@ -1,4 +1,3 @@
-from __future__ import print_function
 from __future__ import division
 from __future__ import unicode_literals
 
@@ -14,7 +13,7 @@ from deepchem.molnet.load_function.kaggle_datasets import load_kaggle
 from deepchem.molnet.load_function.lipo_datasets import load_lipo
 from deepchem.molnet.load_function.muv_datasets import load_muv
 from deepchem.molnet.load_function.nci_datasets import load_nci
-from deepchem.molnet.load_function.pcba_datasets import load_pcba
+from deepchem.molnet.load_function.pcba_datasets import load_pcba, load_pcba_146, load_pcba_2475
 from deepchem.molnet.load_function.pdbbind_datasets import load_pdbbind_grid
 from deepchem.molnet.load_function.ppb_datasets import load_ppb
 from deepchem.molnet.load_function.qm7_datasets import load_qm7
@@ -28,5 +27,12 @@ from deepchem.molnet.load_function.sider_datasets import load_sider
 from deepchem.molnet.load_function.tox21_datasets import load_tox21
 from deepchem.molnet.load_function.toxcast_datasets import load_toxcast
 
+from deepchem.molnet.dnasim import simulate_motif_density_localization
+from deepchem.molnet.dnasim import simulate_motif_counting
+from deepchem.molnet.dnasim import simple_motif_embedding
+from deepchem.molnet.dnasim import motif_density
+from deepchem.molnet.dnasim import simulate_single_motif_detection
+
 from deepchem.molnet.run_benchmark import run_benchmark
-from deepchem.molnet.run_benchmark_low_data import run_benchmark_low_data
+#from deepchem.molnet.run_benchmark_low_data import run_benchmark_low_data
+from deepchem.molnet import run_benchmark_models

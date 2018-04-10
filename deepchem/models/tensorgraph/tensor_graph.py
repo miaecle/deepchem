@@ -1,23 +1,24 @@
+import collections
+import os
 import pickle
 import threading
 import time
 
-import collections
+import logging
 import numpy as np
-import os
-import six
 import tensorflow as tf
-from tensorflow.python.framework.errors_impl import OutOfRangeError
+from tensorflow.python.pywrap_tensorflow_internal import NewCheckpointReader
+import tensorflow.contrib.eager as tfe
 
 from deepchem.data import NumpyDataset
-from deepchem.metrics import to_one_hot, from_one_hot
 from deepchem.models.models import Model
-from deepchem.models.tensorgraph.layers import InputFifoQueue, Label, Feature, Weights, Constant
+from deepchem.models.tensorgraph.layers import InputFifoQueue, Label, Feature, Weights, Constant, Input
+from deepchem.models.tensorgraph.model_ops import create_variable
 from deepchem.models.tensorgraph.optimizers import Adam
 from deepchem.trans import undo_transforms
 from deepchem.utils.evaluate import GeneratorEvaluator
-from deepchem.feat.graph_features import ConvMolFeaturizer
-from deepchem.data.data_loader import featurize_smiles_np
+
+logger = logging.getLogger(__name__)
 
 
 class TensorGraph(Model):
@@ -30,6 +31,7 @@ class TensorGraph(Model):
                use_queue=True,
                graph=None,
                learning_rate=0.001,
+               configproto=None,
                **kwargs):
     """
     Parameters
@@ -51,7 +53,7 @@ class TensorGraph(Model):
       is created.
     learning_rate: float or LearningRateSchedule
       the learning rate to use for optimization
-    kwargs
+    configproto: a tf.ConfigProto() object used to create tf.Session()
     """
 
     # Layer Management
@@ -66,6 +68,7 @@ class TensorGraph(Model):
     self.queue_installed = False
     self.optimizer = Adam(
         learning_rate=learning_rate, beta1=0.9, beta2=0.999, epsilon=1e-7)
+    self.configproto = configproto
 
     # Singular place to hold Tensor objects which don't serialize
     # These have to be reconstructed on restoring from pickle
@@ -118,7 +121,8 @@ class TensorGraph(Model):
           checkpoint_interval=1000,
           deterministic=False,
           restore=False,
-          submodel=None):
+          submodel=None,
+          **kwargs):
     """Train this model on a dataset.
 
     Parameters
@@ -176,43 +180,55 @@ class TensorGraph(Model):
     -------
     the average loss over the most recent checkpoint interval
     """
-
-    def create_feed_dict():
-      if self.use_queue:
-        while True:
-          yield {self._training_placeholder: 1.0}
-      for d in feed_dict_generator:
-        feed_dict = dict(d)
-        feed_dict[self._training_placeholder] = 1.0
-        yield feed_dict
-
     if not self.built:
       self.build()
     with self._get_tf("Graph").as_default():
       time1 = time.time()
       loss = self.loss
-      if submodel is None:
-        train_op = self._get_tf('train_op')
+      if submodel is not None and submodel.loss is not None:
+        loss = submodel.loss
+      if tfe.in_eager_mode():
+        # In eager mode we want an optimizer and a function to compute the
+        # gradient of the loss.
+
+        submodel_vars = None
+        if submodel is None:
+          optimizer = self._get_tf("Optimizer")
+        else:
+          optimizer = submodel.create_optimizer()
+          if submodel.layers is not None:
+            submodel_vars = set()
+            for layer in submodel.layers:
+              for var in layer.variables:
+                submodel_vars.add(var)
+        val_grad_fn = tfe.implicit_value_and_gradients(
+            lambda x: self._run_graph([loss], x, True)[0])
       else:
-        train_op = submodel.get_train_op()
-        if submodel.loss is not None:
-          loss = submodel.loss
+        # In graph mode we want a training operation.
+
+        if submodel is None:
+          train_op = self._get_tf('train_op')
+        else:
+          train_op = submodel.get_train_op()
       if checkpoint_interval > 0:
-        saver = tf.train.Saver(max_to_keep=max_checkpoints_to_keep)
+        saver = tf.train.Saver(
+            self.get_variables(),
+            max_to_keep=max_checkpoints_to_keep,
+            save_relative_paths=True)
       if restore:
         self.restore()
       avg_loss, n_averaged_batches = 0.0, 0.0
       n_samples = 0
       n_enqueued = [0]
       final_sample = [None]
-      if self.use_queue:
+      if self.queue_installed:
         enqueue_thread = threading.Thread(
             target=_enqueue_batch,
             args=(self, feed_dict_generator, self._get_tf("Graph"),
                   self.session, n_enqueued, final_sample))
         enqueue_thread.start()
-      for feed_dict in create_feed_dict():
-        if self.use_queue:
+      for feed_dict in self._create_feed_dicts(feed_dict_generator, True):
+        if self.queue_installed:
           # Don't let this thread get ahead of the enqueue thread, since if
           # we try to read more batches than the total number that get queued,
           # this thread will hang indefinitely.
@@ -225,30 +241,39 @@ class TensorGraph(Model):
         n_samples += 1
         should_log = (self.tensorboard and
                       n_samples % self.tensorboard_log_frequency == 0)
-        fetches = [train_op, loss.out_tensor]
-        if should_log:
-          fetches.append(self._get_tf("summary_op"))
-        fetched_values = self.session.run(fetches, feed_dict=feed_dict)
-        if should_log:
-          self._log_tensorboard(fetches[2])
-        avg_loss += fetched_values[1]
+        if tfe.in_eager_mode():
+          value, grads_and_vars = val_grad_fn(feed_dict)
+          if submodel_vars is not None:
+            grads_and_vars = [
+                x for x in grads_and_vars if x[1] in submodel_vars
+            ]
+          optimizer.apply_gradients(grads_and_vars)
+          avg_loss += value
+        else:
+          fetches = [train_op, loss.out_tensor]
+          if should_log:
+            fetches.append(self._get_tf("summary_op"))
+          fetched_values = self.session.run(fetches, feed_dict=feed_dict)
+          if should_log:
+            self._log_tensorboard(fetched_values[2])
+          avg_loss += fetched_values[1]
         n_averaged_batches += 1
         self.global_step += 1
         if checkpoint_interval > 0 and self.global_step % checkpoint_interval == checkpoint_interval - 1:
           saver.save(self.session, self.save_file, global_step=self.global_step)
           avg_loss = float(avg_loss) / n_averaged_batches
-          print('Ending global_step %d: Average loss %g' % (self.global_step,
-                                                            avg_loss))
+          logger.info('Ending global_step %d: Average loss %g' %
+                      (self.global_step, avg_loss))
           avg_loss, n_averaged_batches = 0.0, 0.0
       if n_averaged_batches > 0:
         avg_loss = float(avg_loss) / n_averaged_batches
       if checkpoint_interval > 0:
         if n_averaged_batches > 0:
-          print('Ending global_step %d: Average loss %g' % (self.global_step,
-                                                            avg_loss))
+          logger.info('Ending global_step %d: Average loss %g' %
+                      (self.global_step, avg_loss))
         saver.save(self.session, self.save_file, global_step=self.global_step)
         time2 = time.time()
-        print("TIMING: model fitting took %0.3f s" % (time2 - time1))
+        logger.info("TIMING: model fitting took %0.3f s" % (time2 - time1))
     return avg_loss
 
   def _log_tensorboard(self, summary):
@@ -300,6 +325,44 @@ class TensorGraph(Model):
           feed_dict[initial_state] = zero_state
         yield feed_dict
 
+  def __call__(self, *inputs, **kwargs):
+    """Execute the model in eager mode to compute outputs as a function of inputs.
+
+    This is very similar to predict_on_batch(), except that it returns the outputs
+    as tensors rather than numpy arrays.  That means you can compute the graph's
+    outputs, then do additional calculations based on them, and gradients will
+    be tracked correctly through the whole process.
+
+    Parameters
+    ----------
+    inputs: tensors
+      the values to use for the model's features.  The number of inputs must
+      exactly match the length of the model's `features` property.  The values
+      may be tensors, numpy arrays, or anything else that can be converted to
+      tensors of the correct shape.
+    outputs: list of Layers
+      the output layers to compute.  If this is omitted, self.outputs is used
+      (that is, all outputs that have been added by calling add_output()).
+
+    Returns
+    -------
+    The output tensors, or a list of tensors if multiple outputs were requested.
+    """
+    if len(inputs) != len(self.features):
+      raise ValueError('Expected %d inputs, received %d' % len(self.features),
+                       len(inputs))
+    # TODO Once we drop Python 2 support, turn outputs into a proper keyword arg
+    # instead of using the **kwargs hack.
+    if 'outputs' in kwargs:
+      outputs = kwargs['outputs']
+    else:
+      outputs = self.outputs
+    feed_dict = dict(zip(self.features, inputs))
+    results = self._run_graph(outputs, feed_dict, False)
+    if len(results) == 1:
+      return results[0]
+    return results
+
   def predict_on_generator(self, generator, transformers=[], outputs=None):
     """
     Parameters
@@ -325,13 +388,30 @@ class TensorGraph(Model):
     with self._get_tf("Graph").as_default():
       # Gather results for each output
       results = [[] for out in outputs]
-      for feed_dict in generator:
-        feed_dict = {
-            self.layers[k.name].out_tensor: v
-            for k, v in six.iteritems(feed_dict)
-        }
-        feed_dict[self._training_placeholder] = 0.0
-        feed_results = self.session.run(outputs, feed_dict=feed_dict)
+      n_samples = 0
+      n_enqueued = [0]
+      final_sample = [None]
+      if self.queue_installed:
+        enqueue_thread = threading.Thread(
+            target=_enqueue_batch,
+            args=(self, generator, self._get_tf("Graph"), self.session,
+                  n_enqueued, final_sample))
+        enqueue_thread.start()
+      for feed_dict in self._create_feed_dicts(generator, False):
+        if self.queue_installed:
+          # Don't let this thread get ahead of the enqueue thread, since if
+          # we try to read more batches than the total number that get queued,
+          # this thread will hang indefinitely.
+          while n_enqueued[0] <= n_samples:
+            if n_samples == final_sample[0]:
+              break
+            time.sleep(0)
+          if n_samples == final_sample[0]:
+            break
+        n_samples += 1
+        feed_results = self._run_graph(outputs, feed_dict, False)
+        if tfe.in_eager_mode():
+          feed_results = [f.numpy() for f in feed_results]
         if len(feed_results) > 1:
           if len(transformers):
             raise ValueError("Does not support transformations "
@@ -458,6 +538,49 @@ class TensorGraph(Model):
   def build(self):
     if self.built:
       return
+    if tfe.in_eager_mode():
+      # In eager mode, we need to execute every layer once to ensure its variables
+      # have been created.
+
+      def build_layers(layer, tensors):
+        if layer in tensors:
+          return tensors[layer]
+        inputs = [build_layers(input, tensors) for input in layer.in_layers]
+        if isinstance(layer, Input):
+          # We can't execute Input layers in eager mode, since they would try
+          # to create placeholders.  Instead create a tensor of the correct
+          # size and type.
+          shape = [1 if s is None else s for s in layer.shape]
+          tensor = tf.zeros(shape, layer.dtype)
+        else:
+          with tf.name_scope(layer.name):
+            tensor = layer.create_tensor(in_layers=inputs, set_tensors=False)
+        tensors[layer] = tensor
+        return tensor
+
+      tensors = {}
+      with self._get_tf("Graph").as_default():
+        # Build the layers.
+
+        build_layers(self.loss, tensors)
+        for output in self.outputs:
+          build_layers(output, tensors)
+        for submodel in self.submodels:
+          build_layers(submodel.loss, tensors)
+
+        # Initialize variables.
+
+        for layer in self.layers.values():
+          if layer.variable_values is not None:
+            for var, val in zip(layer.variables, layer.variable_values):
+              var.assign(val)
+      self.session = None
+      self._training_placeholder = None
+      self.built = True
+      return
+
+    # In graph mode we need to create the computation graph.
+
     with self._get_tf("Graph").as_default():
       self._training_placeholder = tf.placeholder(dtype=tf.float32, shape=())
       if self.random_seed is not None:
@@ -470,7 +593,7 @@ class TensorGraph(Model):
           self.rnn_final_states += layer.rnn_final_states
           self.rnn_zero_states += layer.rnn_zero_states
           layer.add_summary_to_tg()
-      self.session = tf.Session()
+      self.session = tf.Session(config=self.configproto)
       self.built = True
 
       # Ensure all training operators have been created.
@@ -517,14 +640,17 @@ class TensorGraph(Model):
       for layer in self.features + self.labels + self.task_weights:
         layer.pre_queue = True
       return
+    inputs = self.features + self.labels + self.task_weights
+    if len(inputs) == 0:
+      return
     names = []
     shapes = []
     pre_q_inputs = []
     q = InputFifoQueue(shapes, names, in_layers=pre_q_inputs)
     q.name = "%s_%s" % (q.__class__.__name__, len(self.layers) + 1)
 
-    for layer in self.features + self.labels + self.task_weights:
-      pre_q_input = layer.create_pre_q(self.batch_size)
+    for layer in inputs:
+      pre_q_input = layer.create_pre_q()
       shapes.append(pre_q_input.shape)
       names.append(pre_q_input.name)
       pre_q_inputs.append(pre_q_input)
@@ -640,7 +766,7 @@ class TensorGraph(Model):
       try:
         pickle.dump(self, fout)
       except Exception as e:
-        print(self.get_pickling_errors(self))
+        logger.info(self.get_pickling_errors(self))
         raise e
 
     # add out_tensor back to everyone
@@ -687,6 +813,8 @@ class TensorGraph(Model):
 
   def get_layer_variables(self, layer):
     """Get the list of trainable variables in a layer of the graph."""
+    if tfe.in_eager_mode():
+      return layer.variables
     if not self.built:
       self.build()
     with self._get_tf("Graph").as_default():
@@ -694,6 +822,19 @@ class TensorGraph(Model):
         return []
       return tf.get_collection(
           tf.GraphKeys.TRAINABLE_VARIABLES, scope=layer.variable_scope)
+
+  def get_variables(self):
+    """Get the list of all trainable variables in the graph."""
+    if not self.built:
+      self.build()
+    if tfe.in_eager_mode():
+      variables = []
+      for layer in self.layers.values():
+        variables += layer.variables
+      return variables
+    else:
+      with self._get_tf("Graph").as_default():
+        return tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES)
 
   def get_global_step(self):
     return self._get_tf("GlobalStep")
@@ -737,7 +878,7 @@ class TensorGraph(Model):
           key=tf.GraphKeys.SUMMARIES)
     elif obj == 'GlobalStep':
       with self._get_tf("Graph").as_default():
-        self.tensor_objects['GlobalStep'] = tf.Variable(0, trainable=False)
+        self.tensor_objects['GlobalStep'] = create_variable(0, trainable=False)
     return self._get_tf(obj)
 
   def save_checkpoint(self, max_checkpoints_to_keep=5):
@@ -752,19 +893,43 @@ class TensorGraph(Model):
     max_checkpoints_to_keep: int
       the maximum number of checkpoints to keep.  Older checkpoints are discarded.
     """
-    saver = tf.train.Saver(max_to_keep=max_checkpoints_to_keep)
+    saver = tf.train.Saver(
+        self.get_variables(), max_to_keep=max_checkpoints_to_keep)
     saver.save(self.session, self.save_file, global_step=self.global_step)
 
-  def restore(self):
-    """Reload the values of all variables from the most recent checkpoint file."""
+  def get_checkpoints(self):
+    """Get a list of all available checkpoint files."""
+    return tf.train.get_checkpoint_state(
+        self.model_dir).all_model_checkpoint_paths
+
+  def restore(self, checkpoint=None):
+    """Reload the values of all variables from a checkpoint file.
+
+    Parameters
+    ----------
+    checkpoint: str
+      the path to the checkpoint file to load.  If this is None, the most recent
+      checkpoint will be chosen automatically.  Call get_checkpoints() to get a
+      list of all available checkpoints.
+    """
     if not self.built:
       self.build()
-    last_checkpoint = tf.train.latest_checkpoint(self.model_dir)
-    if last_checkpoint is None:
+    if checkpoint is None:
+      checkpoint = tf.train.latest_checkpoint(self.model_dir)
+    if checkpoint is None:
       raise ValueError('No checkpoint found')
     with self._get_tf("Graph").as_default():
-      saver = tf.train.Saver()
-      saver.restore(self.session, last_checkpoint)
+      reader = NewCheckpointReader(checkpoint)
+      var_names = set([x for x in reader.get_variable_to_shape_map()])
+      var_list = []
+      for var in self.get_variables():
+        name = var.name
+        if ':' in name:
+          name = name[:name.rfind(':')]
+        if name in var_names:
+          var_list.append(var)
+      saver = tf.train.Saver(var_list=var_list)
+      saver.restore(self.session, checkpoint)
 
   def get_num_tasks(self):
     return len(self.outputs)
@@ -775,20 +940,226 @@ class TensorGraph(Model):
     return self.layers[pre_q_name]
 
   @staticmethod
-  def load_from_dir(model_dir):
+  def load_from_dir(model_dir, restore=True):
     pickle_name = os.path.join(model_dir, "model.pickle")
     with open(pickle_name, 'rb') as fout:
       tensorgraph = pickle.load(fout)
       tensorgraph.built = False
       tensorgraph.model_dir = model_dir
-      try:
-        tensorgraph.restore()
-      except ValueError:
-        pass  # No checkpoint to load
+      if restore:
+        try:
+          tensorgraph.restore()
+        except ValueError:
+          pass  # No checkpoint to load
       return tensorgraph
 
   def __del__(self):
     pass
+
+  def _create_feed_dicts(self, generator, training):
+    """Create feed dicts for use in fitting or prediction.
+
+    Parameters
+    ----------
+    generator: Generator
+      the feed dict generator that was passed to fit_generator() or predict_on_generator()
+    training: bool
+      True during training, False during prediction
+    """
+    if tfe.in_eager_mode():
+      for d in generator:
+        feed_dict = {}
+        for key, value in d.items():
+          if isinstance(key, Input):
+            feed_dict[key] = tf.cast(value, key.dtype)
+          else:
+            feed_dict[key] = value
+        yield feed_dict
+    else:
+      train_value = 1.0 if training else 0.0
+      if self.queue_installed:
+        while True:
+          yield {self._training_placeholder: train_value}
+      for d in generator:
+        feed_dict = dict(d)
+        feed_dict[self._training_placeholder] = train_value
+        yield feed_dict
+
+  def _run_graph(self, outputs, feed_dict, training):
+    """Run the calculations in the graph to compute some outputs.
+
+    In graph mode, this just calls session.run().  In eager mode, it executes
+    all required layers to compute the output.
+
+    Parameters
+    ----------
+    outputs: list of Layers
+      the output layers to compute
+    feed_dict: dict
+      maps input layers to values
+    training: bool
+      whether this is being executed in training mode
+    """
+    if not tfe.in_eager_mode():
+      return self.session.run(outputs, feed_dict)
+
+    def run_layers(layer, tensors):
+      if layer in tensors:
+        return tensors[layer]
+      inputs = [run_layers(input, tensors) for input in layer.in_layers]
+      tensor = layer.create_tensor(
+          in_layers=inputs, set_tensors=False, training=training)
+      tensors[layer] = tensor
+      return tensor
+
+    tensors = feed_dict.copy()
+    return [run_layers(o, tensors) for o in outputs]
+
+  def make_estimator(self,
+                     feature_columns,
+                     weight_column=None,
+                     metrics={},
+                     model_dir=None,
+                     config=None):
+    """Construct a Tensorflow Estimator from this model.
+
+    tf.estimator.Estimator is the standard Tensorflow API for representing models.
+    This method provides interoperability between DeepChem and other Tensorflow
+    based tools by allowing any model to be used an Estimator.
+
+    Once this method returns, the Estimator it created is independent of the model
+    it was created from.  They do not share tensors, variables, save files, or any
+    other resources.  The Estimator is a self contained object with its own methods
+    for training, evaluation, prediction, checkpointing, etc.
+
+    Parameters
+    ----------
+    feature_columns: list of tf.feature_column objects
+      this describes the input features to the models.  There must be one entry
+      for each Feature layer in this model's features field.
+    weight_column: tf.feature_column or None
+      if this model includes a Weights layer, this describes the input weights.
+      Otherwise, this should be None.
+    metrics: map
+      metrics that should be computed in calls to evaluate().  For each entry,
+      the key is the name to report for the metric, and the value is a function
+      of the form f(labels, predictions, weights) that returns the tensors for
+      computing the metric.  Any of the functions in tf.metrics can be used, as
+      can other functions that satisfy the same interface.
+    model_dir: str
+      the directory in which the Estimator should save files.  If None, this
+      defaults to the model's model_dir.
+    config: RunConfig
+      configuration options for the Estimator
+    """
+    # Check the inputs.
+
+    if tfe.in_eager_mode():
+      raise ValueError('make_estimator() is not supported in eager mode')
+    if len(feature_columns) != len(self.features):
+      raise ValueError(
+          'This model requires %d feature column(s)' % len(self.features))
+    if len(self.labels) != 1:
+      raise ValueError(
+          'Can only create an Estimator from a model with exactly one Label input'
+      )
+    if len(self.task_weights) > 1:
+      raise ValueError(
+          'Cannot create an Estimator from a model with multiple Weight inputs')
+    if weight_column is None:
+      if len(self.task_weights) > 0:
+        raise ValueError('This model requires a weight column')
+    else:
+      if len(self.task_weights) == 0:
+        raise ValueError(
+            'Cannot specify weight_column for a model with no Weight inputs')
+    if model_dir is None:
+      model_dir = self.model_dir
+
+    # Define a function that recursively creates tensors from layers.
+
+    def create_tensors(layer, tensors, training):
+      if layer in tensors:
+        return tensors[layer]
+      inputs = [
+          create_tensors(in_layer, tensors, training)
+          for in_layer in layer.in_layers
+      ]
+      tensor = layer.create_tensor(
+          in_layers=inputs, set_tensors=False, training=training)
+      tensors[layer] = tensor
+      layer.add_summary_to_tg(tensor)
+      return tensor
+
+    # Define the model function.
+
+    def model_fn(features, labels, mode):
+      # Define the inputs.
+
+      tensors = self.create_estimator_inputs(feature_columns, weight_column,
+                                             features, labels, mode)
+      for layer, tensor in tensors.items():
+        layer.add_summary_to_tg(tensor)
+
+      # Create the correct outputs, based on the mode.
+
+      if mode == tf.estimator.ModeKeys.PREDICT:
+        predictions = {}
+        for i, output in enumerate(self.outputs):
+          predictions[i] = create_tensors(output, tensors, 0)
+        return tf.estimator.EstimatorSpec(mode, predictions=predictions)
+      if mode == tf.estimator.ModeKeys.EVAL:
+        loss = create_tensors(self.loss, tensors, 0)
+        predictions = create_tensors(self.outputs[0], tensors, 0)
+        if len(self.task_weights) == 0:
+          weights = None
+        else:
+          weights = tensors[self.task_weights[0]]
+        eval_metric_ops = {}
+        for name, function in metrics.items():
+          eval_metric_ops[name] = function(tensors[self.labels[0]], predictions,
+                                           weights)
+        return tf.estimator.EstimatorSpec(
+            mode, loss=loss, eval_metric_ops=eval_metric_ops)
+      if mode == tf.estimator.ModeKeys.TRAIN:
+        loss = create_tensors(self.loss, tensors, 1)
+        global_step = tf.train.get_global_step()
+        optimizer = self.optimizer._create_optimizer(global_step)
+        train_op = optimizer.minimize(loss, global_step=global_step)
+        return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
+      raise ValueError('Unknown mode')
+
+    # Create the Estimator.
+
+    return tf.estimator.Estimator(
+        model_fn=model_fn, model_dir=model_dir, config=config)
+
+  def create_estimator_inputs(self, feature_columns, weight_column, features,
+                              labels, mode):
+    """This is called by make_estimator() to create tensors for the inputs.
+
+    feature_columns and weight_column are the arguments passed to
+    make_estimator().  features, labels, and mode are the arguments passed to
+    the estimator's model function.  This method creates and returns a dict with
+    one entry for every Feature, Label, or Weights layer in the graph.  The keys
+    are the layers, and the values are the tensors that correspond to them.
+
+    Any subclass that overrides default_generator() must also override this
+    method.
+    """
+    if self.__class__.default_generator != TensorGraph.default_generator:
+      raise ValueError(
+          "Class overrides default_generator() but not create_estimator_inputs()"
+      )
+    tensors = {}
+    for layer, column in zip(self.features, feature_columns):
+      tensors[layer] = tf.feature_column.input_layer(features, [column])
+    if weight_column is not None:
+      tensors[self.task_weights[0]] = tf.feature_column.input_layer(
+          features, [weight_column])
+    if labels is not None:
+      tensors[self.labels[0]] = tf.cast(labels, self.labels[0].dtype)
+    return tensors
 
 
 def _enqueue_batch(tg, generator, graph, sess, n_enqueued, final_sample):
@@ -811,7 +1182,22 @@ def _enqueue_batch(tg, generator, graph, sess, n_enqueued, final_sample):
       enq = {}
       enq[tg._training_placeholder] = 1.0
       for layer in tg.features + tg.labels + tg.task_weights:
-        enq[tg.get_pre_q_input(layer).out_tensor] = feed_dict[layer]
+        if layer in feed_dict:
+          value = feed_dict[layer]
+          # Add or remove dimensions of size 1 to match the shape of the layer.
+          value_dims = len(value.shape)
+          layer_dims = len(layer.shape)
+          if value_dims < layer_dims:
+            if all(i == 1 for i in layer.shape[value_dims:]):
+              value = value.reshape(
+                  list(value.shape) + [1] * (layer_dims - value_dims))
+          if value_dims > layer_dims:
+            if all(i == 1 for i in value.shape[layer_dims:]):
+              value = value.reshape(value.shape[:layer_dims])
+        else:
+          value = np.zeros(
+              [0] + list(layer.shape[1:]), dtype=layer.dtype.as_numpy_dtype)
+        enq[tg.get_pre_q_input(layer).out_tensor] = value
       sess.run(tg.input_queue.out_tensor, feed_dict=enq)
       n_enqueued[0] += 1
     final_sample[0] = n_enqueued[0]
@@ -870,11 +1256,17 @@ class Submodel(object):
         loss = self.graph.loss
       else:
         loss = self.loss
-      if self.optimizer is None:
-        optimizer = self.graph.optimizer
-      else:
-        optimizer = self.optimizer
+      tf_opt = self.create_optimizer()
       global_step = self.graph._get_tf('GlobalStep')
-      tf_opt = optimizer._create_optimizer(global_step)
       self._train_op = tf_opt.minimize(loss.out_tensor, global_step, variables)
     return self._train_op
+
+  def create_optimizer(self):
+    """Create the Tensorflow optimizer to use for training."""
+    if self.optimizer is None:
+      optimizer = self.graph.optimizer
+    else:
+      optimizer = self.optimizer
+    # Should we keep a separate global step count for each submodel?
+    global_step = self.graph._get_tf('GlobalStep')
+    return optimizer._create_optimizer(global_step)
